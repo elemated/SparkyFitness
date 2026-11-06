@@ -457,6 +457,97 @@ const duplicateExerciseSchema = z
   })
   .strict();
 
+// Muscles and equipment arrive as an array or a comma-separated string.
+const exerciseTagListSchema = z.union([
+  z.array(z.string().min(1).max(100)).max(50),
+  z.string().max(2000),
+]);
+
+const updateExerciseSchema = z
+  .object({
+    action: z.literal('update_exercise'),
+    exercise_id: uuidSchema.optional().describe('UUID of the exercise'),
+    exercise_name: z
+      .string()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe('Exact name of the exercise (alternative to ID)'),
+    confirmed: confirmedSchema,
+    name: z.string().min(1).max(200).optional().describe('New name'),
+    category: z.string().min(1).max(100).optional().describe('New category'),
+    calories_per_hour: z.coerce
+      .number()
+      .min(0)
+      .max(5000)
+      .optional()
+      .describe('New calories burned per hour'),
+    description: z.string().max(1000).optional().describe('New description'),
+    equipment: exerciseTagListSchema
+      .optional()
+      .describe('Replacement equipment list'),
+    primary_muscles: exerciseTagListSchema
+      .optional()
+      .describe('Replacement primary muscles list'),
+    secondary_muscles: exerciseTagListSchema
+      .optional()
+      .describe('Replacement secondary muscles list'),
+  })
+  .strict();
+
+const syncExerciseEntriesSchema = z
+  .object({
+    action: z.literal('sync_exercise_entries'),
+    exercise_id: uuidSchema.describe(
+      'UUID of the exercise whose diary entries to update'
+    ),
+    confirmed: confirmedSchema,
+    recompute_calories: z
+      .boolean()
+      .optional()
+      .describe(
+        'Also recompute calories_burned from calories_per_hour x duration, only for entries with a duration and no measured calories'
+      ),
+  })
+  .strict();
+
+const addExerciseImageSchema = z
+  .object({
+    action: z.literal('add_exercise_image'),
+    exercise_id: uuidSchema.describe('UUID of an exercise you own'),
+    url: z
+      .string()
+      .min(1)
+      .max(2048)
+      .describe('Public http(s) URL of a PNG, JPEG, GIF or WebP image'),
+    confirmed: confirmedSchema,
+  })
+  .strict();
+
+const removeExerciseImageSchema = z
+  .object({
+    action: z.literal('remove_exercise_image'),
+    exercise_id: uuidSchema.describe('UUID of an exercise you own'),
+    path: z
+      .string()
+      .min(1)
+      .max(1000)
+      .optional()
+      .describe('Image path as listed by get_exercise_details'),
+    index: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe('Image index as listed by get_exercise_details (0-based)'),
+    confirmed: confirmedSchema,
+  })
+  .strict()
+  .refine((value) => value.path !== undefined || value.index !== undefined, {
+    message: 'Either path or index must be provided',
+    path: ['path'],
+  });
+
 const createWorkoutPresetSchema = z
   .object({
     action: z.literal('create_workout_preset'),
@@ -661,6 +752,10 @@ export const manageExerciseSchema = z.discriminatedUnion('action', [
   deleteExerciseEntrySchema,
   getExerciseDetailsSchema,
   duplicateExerciseSchema,
+  updateExerciseSchema,
+  syncExerciseEntriesSchema,
+  addExerciseImageSchema,
+  removeExerciseImageSchema,
   createWorkoutPresetSchema,
   updateWorkoutPresetSchema,
   deleteWorkoutPresetSchema,
@@ -689,6 +784,10 @@ export const manageExerciseInput = z.object({
       'delete_exercise_entry',
       'get_exercise_details',
       'duplicate_exercise',
+      'update_exercise',
+      'sync_exercise_entries',
+      'add_exercise_image',
+      'remove_exercise_image',
       'create_workout_preset',
       'update_workout_preset',
       'delete_workout_preset',
@@ -753,7 +852,7 @@ export const manageExerciseInput = z.object({
     .max(200)
     .optional()
     .describe(
-      'Name — for create_exercise / create_workout_preset / update_workout_preset'
+      'Name — for create_exercise / update_exercise / create_workout_preset / update_workout_preset'
     ),
   // search
   searchTerm: z
@@ -770,7 +869,47 @@ export const manageExerciseInput = z.object({
     .string()
     .optional()
     .describe(
-      "Equipment filter (e.g., 'Dumbbell', 'None') for search_exercises; comma-separated equipment the user has for suggest_alternatives"
+      "Equipment filter (e.g., 'Dumbbell', 'None') for search_exercises; comma-separated equipment the user has for suggest_alternatives; comma-separated replacement equipment list for update_exercise"
+    ),
+  primary_muscles: z
+    .string()
+    .optional()
+    .describe(
+      'For update_exercise: comma-separated replacement primary muscles'
+    ),
+  secondary_muscles: z
+    .string()
+    .optional()
+    .describe(
+      'For update_exercise: comma-separated replacement secondary muscles'
+    ),
+  recompute_calories: z
+    .boolean()
+    .optional()
+    .describe(
+      'For sync_exercise_entries: also recompute calories_burned from calories_per_hour x duration for entries without measured calories'
+    ),
+  url: z
+    .string()
+    .max(2048)
+    .optional()
+    .describe(
+      'For add_exercise_image: public http(s) URL of a PNG, JPEG, GIF or WebP image'
+    ),
+  path: z
+    .string()
+    .max(1000)
+    .optional()
+    .describe(
+      'For remove_exercise_image: image path from get_exercise_details'
+    ),
+  index: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe(
+      'For remove_exercise_image: 0-based image index from get_exercise_details'
     ),
   alternative_mode: z
     .enum(EXERCISE_ALTERNATIVE_MODES)
@@ -945,7 +1084,7 @@ export const manageExerciseInput = z.object({
     .boolean()
     .optional()
     .describe(
-      'Must be true to apply update_workout_preset or delete_workout_preset. If omitted or false, the tool returns a confirmation prompt and does not change anything.'
+      'Must be true to apply update_exercise, sync_exercise_entries, add_exercise_image, remove_exercise_image, update_workout_preset or delete_workout_preset. If omitted or false, the tool returns a preview or confirmation prompt and does not change anything.'
     ),
   // entry management
   entry_id: uuidSchema

@@ -49,6 +49,16 @@ vi.mock('../models/exerciseEntry', () => ({
     getExerciseUsage: vi.fn(),
   },
 }));
+vi.mock('../models/exerciseRepository', () => ({
+  getExerciseEntrySyncPreview: vi.fn(),
+  syncExerciseEntriesWithExercise: vi.fn(),
+  appendExerciseImage: vi.fn(),
+  removeExerciseImage: vi.fn(),
+  default: {},
+}));
+vi.mock('../utils/imageDownloader', () => ({
+  downloadUserSuppliedImage: vi.fn(),
+}));
 vi.mock('../models/workoutPresetRepository', () => ({
   default: {
     getWorkoutPresetByName: vi.fn(),
@@ -2237,7 +2247,10 @@ describe('get_exercise_details (manage action)', () => {
         '**Muscles:** Chest, Triceps\n\n' +
         '#### Instructions\n' +
         '1. Lie on the bench.\n' +
-        '2. Press the bar.\n'
+        '2. Press the bar.\n' +
+        '\n' +
+        '#### Images (index: path)\n' +
+        '- [0] bench.png\n'
     );
     expect(exerciseService.getExerciseById).toHaveBeenCalledWith(
       'user-1',

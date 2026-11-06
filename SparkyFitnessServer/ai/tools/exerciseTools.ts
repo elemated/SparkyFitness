@@ -25,11 +25,29 @@ import {
   setWorkoutFeedbackForEntry,
 } from '../../services/workoutCoachingService.js';
 import { getWorkoutCoachingSignals } from '../../services/adaptiveWorkoutService.js';
+import { promises as fsp } from 'node:fs';
 import exerciseDb from '../../models/exercise.js';
 import exerciseEntryDb from '../../models/exerciseEntry.js';
 import workoutPresetRepository from '../../models/workoutPresetRepository.js';
+import {
+  appendExerciseImage,
+  getExerciseEntrySyncPreview,
+  removeExerciseImage,
+  syncExerciseEntriesWithExercise,
+  type ExerciseEntrySyncSummary,
+} from '../../models/exerciseRepository.js';
+import { downloadUserSuppliedImage } from '../../utils/imageDownloader.js';
+import {
+  PUBLIC_ONLY_AI_NETWORK_POLICY,
+  assertOutboundUrlShapeAndLiteralAllowed,
+  isOutboundUrlBlockedError,
+} from '../../utils/outboundUrlPolicy.js';
+import { resolveUploadPathWithinRoot } from '../../utils/uploadsPath.js';
 import { ERRORS, formatZodError } from './errors.js';
-import { findExerciseByExactName } from './exerciseLookup.js';
+import {
+  findExerciseByExactName,
+  findExercisesByExactName,
+} from './exerciseLookup.js';
 import {
   compactRecord,
   dayString,
@@ -67,6 +85,10 @@ const VALID_ACTIONS = [
   'update_exercise_entry',
   'delete_exercise_entry',
   'get_exercise_details',
+  'update_exercise',
+  'sync_exercise_entries',
+  'add_exercise_image',
+  'remove_exercise_image',
   'create_workout_preset',
   'update_workout_preset',
   'delete_workout_preset',
@@ -725,6 +747,234 @@ async function getExerciseProgress(
   );
 }
 
+// The library row the edit actions read. Array columns may still be JSON text.
+interface EditableExerciseRow {
+  id: string;
+  name: string;
+  category?: string | null;
+  calories_per_hour?: number | string | null;
+  description?: string | null;
+  modality?: string | null;
+  equipment?: unknown;
+  primary_muscles?: unknown;
+  secondary_muscles?: unknown;
+  images?: unknown;
+  user_id?: string | null;
+  shared_with_public?: boolean | null;
+}
+
+type ExerciseResolution =
+  | { exercise: EditableExerciseRow; text?: undefined }
+  | { exercise?: undefined; text: string };
+
+function exerciseOwnershipLabel(
+  row: { user_id?: string | null; shared_with_public?: boolean | null },
+  userId: string
+): string {
+  if (row.user_id === userId) return 'yours';
+  if (!row.user_id) return 'System';
+  return row.shared_with_public ? 'public' : 'family-shared';
+}
+
+function numberOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Finds one visible exercise by id or exact name. Several exact name matches
+// are ambiguous: the candidates are returned and nothing is picked.
+async function resolveExerciseForEdit(
+  userId: string,
+  params: { exercise_id?: string; exercise_name?: string },
+  retryAction: string
+): Promise<ExerciseResolution> {
+  let exerciseId = params.exercise_id;
+  if (!exerciseId) {
+    if (!params.exercise_name) {
+      return {
+        text: ERRORS.VALIDATION(
+          'Either exercise_id or exercise_name must be provided'
+        ),
+      };
+    }
+    const matches: EditableExerciseRow[] = await findExercisesByExactName(
+      userId,
+      params.exercise_name
+    );
+    if (matches.length === 0) {
+      return { text: ERRORS.NOT_FOUND('Exercise', params.exercise_name) };
+    }
+    if (matches.length > 1) {
+      const lines = matches.map(
+        (m) =>
+          `- ${m.name} (ID: ${m.id}, ${exerciseOwnershipLabel(m, userId)}${m.category ? `, ${m.category}` : ''})`
+      );
+      return {
+        text:
+          `Several exercises are named "${params.exercise_name}":\n${lines.join('\n')}\n\n` +
+          `Ask the user which one they mean, then call ${retryAction} again with its exercise_id. Nothing was changed.`,
+      };
+    }
+    exerciseId = String(matches[0].id);
+  }
+  let exercise: EditableExerciseRow | null | undefined;
+  try {
+    exercise = await exerciseService.getExerciseById(userId, exerciseId);
+  } catch {
+    exercise = null;
+  }
+  if (!exercise) {
+    return { text: ERRORS.NOT_FOUND('Exercise', exerciseId) };
+  }
+  return { exercise };
+}
+
+// Library edits are owner-only: a System, public or family-shared exercise
+// belongs to someone else, and changing it would change their library.
+async function resolveOwnedExercise(
+  userId: string,
+  params: { exercise_id?: string; exercise_name?: string },
+  retryAction: string
+): Promise<ExerciseResolution> {
+  const resolved = await resolveExerciseForEdit(userId, params, retryAction);
+  if (!resolved.exercise) return resolved;
+  const ownerId = await exerciseDb.getExerciseOwnerId(
+    resolved.exercise.id,
+    userId
+  );
+  if (ownerId !== userId) {
+    const label = exerciseOwnershipLabel(
+      { ...resolved.exercise, user_id: ownerId ?? null },
+      userId
+    );
+    const kind =
+      label === 'System'
+        ? 'a built-in System exercise'
+        : label === 'public'
+          ? 'a public exercise shared by another user'
+          : 'shared with you by another user';
+    return {
+      text: ERRORS.FORBIDDEN(
+        `"${resolved.exercise.name}" is ${kind}. Only exercises you own can be changed. Use duplicate_exercise to make your own copy and edit that instead. Nothing was changed.`
+      ),
+    };
+  }
+  return resolved;
+}
+
+type ExerciseEditField =
+  | 'name'
+  | 'category'
+  | 'calories_per_hour'
+  | 'description'
+  | 'equipment'
+  | 'primary_muscles'
+  | 'secondary_muscles';
+
+const EXERCISE_LIST_FIELDS: readonly ExerciseEditField[] = [
+  'equipment',
+  'primary_muscles',
+  'secondary_muscles',
+];
+
+type ExerciseFieldValue = string | number | string[] | null;
+
+function currentExerciseField(
+  row: EditableExerciseRow,
+  field: ExerciseEditField
+): ExerciseFieldValue {
+  if (EXERCISE_LIST_FIELDS.includes(field)) {
+    return safeParseJson(row[field]);
+  }
+  if (field === 'calories_per_hour') return numberOrNull(row.calories_per_hour);
+  return (row[field] as string | null | undefined) ?? null;
+}
+
+function formatExerciseFieldValue(value: ExerciseFieldValue): string {
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '(none)';
+  if (value === null || value === '') return '(none)';
+  return String(value);
+}
+
+interface ExerciseFieldChange {
+  field: ExerciseEditField;
+  before: ExerciseFieldValue;
+  after: ExerciseFieldValue;
+}
+
+function formatFieldChanges(changes: ExerciseFieldChange[]): string {
+  return changes
+    .map(
+      (c) =>
+        `- ${c.field}: ${formatExerciseFieldValue(c.before)} → ${formatExerciseFieldValue(c.after)}`
+    )
+    .join('\n');
+}
+
+function toTagList(value: string | string[]): string[] {
+  const items = Array.isArray(value) ? value : splitCommaList(value);
+  return items.map((item) => item.trim()).filter(Boolean);
+}
+
+function formatKcal(value: number): string {
+  return `${Math.round(value * 10) / 10} kcal`;
+}
+
+function formatSyncSummary(
+  summary: ExerciseEntrySyncSummary,
+  recompute: boolean
+): string {
+  const lines = [
+    `- Entries: ${summary.entry_count}`,
+    `- Calorie total: ${formatKcal(summary.calories_before)} → ${formatKcal(summary.calories_after)}`,
+  ];
+  if (recompute) {
+    lines.push(
+      `- Recomputed (calories_per_hour × duration): ${summary.recomputed_count}`,
+      `- Kept (measured, synced or linked calories): ${summary.kept_measured_count}`,
+      `- Kept (no duration): ${summary.no_duration_count}`
+    );
+  } else {
+    lines.push(
+      '- Calories burned are not recomputed (recompute_calories is off).'
+    );
+  }
+  return lines.join('\n');
+}
+
+// Download failures that are the URL's fault, worded for the user. Anything
+// else (disk, database) is rethrown to the generic handler.
+function describeImageDownloadFailure(error: unknown): string | null {
+  if (isOutboundUrlBlockedError(error)) {
+    return 'The URL points to a private or internal network address, which is not allowed.';
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const name = error instanceof Error ? error.name : '';
+  if (name === 'TimeoutError' || name === 'AbortError') {
+    return 'The image server took too long to respond.';
+  }
+  if (/exceeds maximum size/.test(message)) {
+    return 'The image is larger than the 10 MB limit.';
+  }
+  if (/disallowed content-type|does not match its content-type/.test(message)) {
+    return 'The URL did not return a PNG, JPEG, GIF or WebP image.';
+  }
+  if (/redirect/i.test(message)) {
+    return 'The URL redirected too many times or without a destination.';
+  }
+  if (/Upstream returned status/.test(message)) {
+    return `The image server answered with an error (${message.replace(/^.*status /, 'HTTP ')}).`;
+  }
+  if (
+    error instanceof TypeError ||
+    /fetch failed|ENOTFOUND|ECONNREFUSED/.test(message)
+  ) {
+    return 'The image could not be fetched from that URL.';
+  }
+  return null;
+}
+
 // Standalone domain tools.
 const exerciseDateRangeSchema = z.object({
   date: optionalDateSchema,
@@ -785,7 +1035,11 @@ Actions:
 - log_workout_preset(entry_date, preset_id?|preset_name?, location?, wod_score?:{score_type:time|rounds_reps|total_reps|completion, rounds_completed?, reps_completed?, elapsed_seconds?, status?:rx|scaled, scaling_notes?}) — location is an optional gym name for the session. preset_name is own or family-shared only; public presets must use preset_id. wod_score is only for non-standard formats; the preset's format and time cap are copied onto the score. Typical score_type: AMRAP → rounds_reps; For Time → time (rounds_reps if the cap was hit); EMOM/Tabata/Interval → completion or total_reps.
 - update_exercise_entry(entry_id, entry_date?, duration_minutes?, calories_burned?, notes?, distance?, avg_heart_rate?, steps?, sets?) — only the provided fields change; sets, when provided, replace all existing sets
 - delete_exercise_entry(entry_id)
-- get_exercise_details(exercise_id?|exercise_name?)
+- get_exercise_details(exercise_id?|exercise_name?) — includes the exercise's images as "[index] path"
+- update_exercise(exercise_id?|exercise_name?, confirmed, name?, category?, calories_per_hour?, description?, equipment?, primary_muscles?, secondary_muscles?) — edits a library exercise the user OWNS (System, public and family-shared exercises are refused; offer duplicate_exercise instead). equipment and muscle lists replace the current list (comma-separated). If several exercises share the name, the tool lists them and changes nothing; ask which one and retry with exercise_id. Without confirmed=true it returns a before/after preview and changes nothing. Never changes logged diary entries.
+- sync_exercise_entries(exercise_id, confirmed, recompute_calories?) — copies the exercise's current name, calories per hour and modality onto the user's own diary entries for it. Without confirmed=true it returns a preview (entry count, calorie total before → after) and changes nothing. recompute_calories=true also sets calories burned to calories_per_hour × duration, but only for entries with a duration and no measured, device-synced or linked calories; those keep their value. Usually run after update_exercise, as a separate step the user agrees to.
+- add_exercise_image(exercise_id, url, confirmed) — downloads a PNG, JPEG, GIF or WebP image (up to 10 MB) from a public http(s) URL and adds it to an exercise the user owns. Private or internal addresses are refused. Without confirmed=true nothing is downloaded.
+- remove_exercise_image(exercise_id, path?|index?, confirmed) — removes one image reference (index and path from get_exercise_details) from an exercise the user owns; the file itself is kept. Without confirmed=true it returns a preview.
 - create_workout_preset(name, exercises, description?, is_public?, workout_format?, time_cap_seconds?) — exercises: array or JSON string of [{exercise_id, sets?:[{reps,weight,duration,distance,rest_time,set_type,notes}], superset_group?, progression_mode?, rep_goal?, increment_type?, increment_value?, equipment_brand?, ramp_increment?}]; items sharing the same superset_group are grouped as a superset; progression_mode/rep_goal/increment_type/increment_value (kg for weight) are between-session overload; ramp_increment (kg, may be negative) pre-fills each successive working set that much heavier within one session — e.g. "+10 lb per set" is 4.54 — distinct from between-session progression
 - update_workout_preset(preset_id, confirmed, name?, description?, is_public?, workout_format?, time_cap_seconds?, exercises?) — only the provided fields change; exercises, when provided, REPLACES the entire exercise list (same shape as create_workout_preset), so call get_workout_preset first and include every exercise that should remain, not just the ones being changed. Progression and ramp fields left out on an exercise keep their current values; send null to clear one. confirmed=true is required to apply; without it the tool returns a prompt and does not change anything. Get the user's go-ahead first, especially if YOU decided what to change (e.g. "review my workouts and improve them").
 - delete_workout_preset(preset_id, confirmed) — permanently deletes the preset. confirmed=true is required; without it the tool returns a prompt and does not delete. Confirm with the user first.
@@ -810,6 +1064,12 @@ Workout formats (workout_format, default standard) drive the in-app timer:
           (args) => {
             if (args.searchTerm) {
               return 'search_exercises';
+            }
+            if (args.url) {
+              return 'add_exercise_image';
+            }
+            if (args.recompute_calories !== undefined) {
+              return 'sync_exercise_entries';
             }
             if (args.exercises && args.preset_id) {
               return 'update_workout_preset';
@@ -956,6 +1216,256 @@ Workout formats (workout_format, default standard) drive the in-app timer:
               });
               return formatConfirmation(
                 `Exercise "${copy.name}" created as a copy of "${original.name}" (ID: ${copy.id}).`
+              );
+            }
+
+            case 'update_exercise': {
+              const resolved = await resolveOwnedExercise(
+                userId,
+                args,
+                'update_exercise'
+              );
+              if (!resolved.exercise) return resolved.text;
+              const current = resolved.exercise;
+
+              const requested: Partial<
+                Record<ExerciseEditField, ExerciseFieldValue>
+              > = {};
+              if (args.name !== undefined) requested.name = args.name;
+              if (args.category !== undefined)
+                requested.category = args.category;
+              if (args.calories_per_hour !== undefined)
+                requested.calories_per_hour = args.calories_per_hour;
+              if (args.description !== undefined)
+                requested.description = args.description;
+              if (args.equipment !== undefined)
+                requested.equipment = toTagList(args.equipment);
+              if (args.primary_muscles !== undefined)
+                requested.primary_muscles = toTagList(args.primary_muscles);
+              if (args.secondary_muscles !== undefined)
+                requested.secondary_muscles = toTagList(args.secondary_muscles);
+              const requestedFields = Object.keys(
+                requested
+              ) as ExerciseEditField[];
+              if (requestedFields.length === 0) {
+                return ERRORS.VALIDATION(
+                  'Provide at least one field to change: name, category, calories_per_hour, description, equipment, primary_muscles or secondary_muscles'
+                );
+              }
+
+              const changes: ExerciseFieldChange[] = requestedFields
+                .map((field) => ({
+                  field,
+                  before: currentExerciseField(current, field),
+                  after: requested[field] as ExerciseFieldValue,
+                }))
+                .filter(
+                  (c) => JSON.stringify(c.before) !== JSON.stringify(c.after)
+                );
+              if (changes.length === 0) {
+                return `"${current.name}" already has these values. Nothing was changed.`;
+              }
+
+              if (args.confirmed !== true) {
+                return (
+                  `Preview of changes to "${current.name}" (ID: ${current.id}):\n${formatFieldChanges(changes)}\n\n` +
+                  'Diary entries keep their own copy of the exercise and are not changed by this. ' +
+                  'Confirm with the user first. If they agree, call update_exercise again with the same fields and confirmed=true. Nothing was changed.'
+                );
+              }
+
+              const updateData = Object.fromEntries(
+                changes.map((c) => [c.field, c.after])
+              );
+              const updated = (await exerciseService.updateExercise(
+                userId,
+                current.id,
+                updateData
+              )) as EditableExerciseRow;
+              const applied = changes.map((c) => ({
+                ...c,
+                after: currentExerciseField(updated, c.field),
+              }));
+              return (
+                formatConfirmation(
+                  `Exercise "${updated.name}" updated (ID: ${current.id}):`
+                ) +
+                `\n${formatFieldChanges(applied)}\n\n` +
+                'Diary entries were not changed. To copy the new name or calories per hour onto logged entries, use sync_exercise_entries.'
+              );
+            }
+
+            case 'sync_exercise_entries': {
+              const resolved = await resolveExerciseForEdit(
+                userId,
+                { exercise_id: args.exercise_id },
+                'sync_exercise_entries'
+              );
+              if (!resolved.exercise) return resolved.text;
+              const exercise = resolved.exercise;
+              const recompute = args.recompute_calories === true;
+              const caloriesPerHour = numberOrNull(exercise.calories_per_hour);
+              if (recompute && caloriesPerHour === null) {
+                return ERRORS.VALIDATION(
+                  `"${exercise.name}" has no calories_per_hour, so calories cannot be recomputed. Set it with update_exercise first, or sync without recompute_calories.`
+                );
+              }
+
+              const preview = await getExerciseEntrySyncPreview(
+                userId,
+                exercise.id,
+                caloriesPerHour,
+                recompute
+              );
+              if (preview.entry_count === 0) {
+                return `No diary entries use "${exercise.name}". Nothing was changed.`;
+              }
+              const snapshotLine = `Name "${exercise.name}", calories per hour ${caloriesPerHour ?? '(none)'} and modality ${exercise.modality ?? '(none)'} are copied onto each entry.`;
+              if (args.confirmed !== true) {
+                return (
+                  `Preview of syncing diary entries with "${exercise.name}" (ID: ${exercise.id}):\n` +
+                  `${formatSyncSummary(preview, recompute)}\n\n${snapshotLine}\n\n` +
+                  'Confirm with the user first. If they agree, call sync_exercise_entries again with the same fields and confirmed=true. Nothing was changed.'
+                );
+              }
+
+              const result = await syncExerciseEntriesWithExercise(
+                userId,
+                exercise.id,
+                {
+                  exercise_name: exercise.name,
+                  calories_per_hour: caloriesPerHour,
+                  modality: exercise.modality ?? null,
+                },
+                recompute
+              );
+              return (
+                formatConfirmation(
+                  `Diary entries synced with "${exercise.name}" (ID: ${exercise.id}):`
+                ) + `\n${formatSyncSummary(result, recompute)}`
+              );
+            }
+
+            case 'add_exercise_image': {
+              try {
+                assertOutboundUrlShapeAndLiteralAllowed(
+                  args.url,
+                  PUBLIC_ONLY_AI_NETWORK_POLICY
+                );
+              } catch (error) {
+                return ERRORS.VALIDATION(
+                  isOutboundUrlBlockedError(error)
+                    ? 'The URL points to a private or internal network address, which is not allowed.'
+                    : 'url must be a public http or https address without credentials or a #fragment.'
+                );
+              }
+              const resolved = await resolveOwnedExercise(
+                userId,
+                { exercise_id: args.exercise_id },
+                'add_exercise_image'
+              );
+              if (!resolved.exercise) return resolved.text;
+              const exercise = resolved.exercise;
+              const existing = safeParseJson(exercise.images);
+
+              if (args.confirmed !== true) {
+                return (
+                  `Preview: the image at ${args.url} will be downloaded (PNG, JPEG, GIF or WebP, up to 10 MB) and added to "${exercise.name}" (ID: ${exercise.id}) as image index ${existing.length}.\n\n` +
+                  'Confirm with the user first. If they agree, call add_exercise_image again with the same fields and confirmed=true. Nothing was downloaded or changed.'
+                );
+              }
+
+              let imagePath: string;
+              try {
+                imagePath = await downloadUserSuppliedImage(
+                  args.url,
+                  exercise.id,
+                  'exercises'
+                );
+              } catch (error) {
+                const reason = describeImageDownloadFailure(error);
+                if (reason) {
+                  return ERRORS.VALIDATION(
+                    `Could not add the image: ${reason} Nothing was changed.`
+                  );
+                }
+                throw error;
+              }
+
+              // The file is new and referenced nowhere else, so it is removed
+              // again when the reference cannot be saved.
+              const discardDownload = async () => {
+                const absolute = resolveUploadPathWithinRoot(imagePath);
+                if (absolute) await fsp.unlink(absolute).catch(() => {});
+              };
+              let appended: Awaited<ReturnType<typeof appendExerciseImage>>;
+              try {
+                appended = await appendExerciseImage(
+                  userId,
+                  exercise.id,
+                  imagePath
+                );
+              } catch (error) {
+                await discardDownload();
+                throw error;
+              }
+              if (!appended) {
+                await discardDownload();
+                return ERRORS.FORBIDDEN(
+                  `"${exercise.name}" is no longer an exercise you own. Nothing was changed.`
+                );
+              }
+              return formatConfirmation(
+                `Image added to "${exercise.name}" as index ${appended.index}: ${imagePath}`
+              );
+            }
+
+            case 'remove_exercise_image': {
+              const resolved = await resolveOwnedExercise(
+                userId,
+                { exercise_id: args.exercise_id },
+                'remove_exercise_image'
+              );
+              if (!resolved.exercise) return resolved.text;
+              const exercise = resolved.exercise;
+              const images = safeParseJson(exercise.images);
+              const index =
+                args.index !== undefined
+                  ? args.index
+                  : images.indexOf(args.path as string);
+              const target = index >= 0 ? images[index] : undefined;
+              if (
+                target === undefined ||
+                (args.path !== undefined && target !== args.path)
+              ) {
+                const listing = images.length
+                  ? images.map((p, i) => `- [${i}] ${p}`).join('\n')
+                  : '(none)';
+                return ERRORS.VALIDATION(
+                  `No image on "${exercise.name}" matches ${args.index !== undefined ? `index ${args.index}` : ''}${args.index !== undefined && args.path !== undefined ? ' and ' : ''}${args.path !== undefined ? `path ${args.path}` : ''}. Current images:\n${listing}`
+                );
+              }
+
+              if (args.confirmed !== true) {
+                return (
+                  `Preview: image [${index}] ${target} will be removed from "${exercise.name}" (ID: ${exercise.id}). Only the reference is removed; the file stays on the server.\n\n` +
+                  'Confirm with the user first. If they agree, call remove_exercise_image again with the same fields and confirmed=true. Nothing was changed.'
+                );
+              }
+
+              // Pinned to the path seen here, so an image list that changed
+              // in the meantime removes nothing rather than the wrong image.
+              const removed = await removeExerciseImage(userId, exercise.id, {
+                index,
+                imagePath: target,
+              });
+              if (!removed) {
+                return ERRORS.VALIDATION(
+                  `The images on "${exercise.name}" changed in the meantime. Call get_exercise_details again to see the current list. Nothing was changed.`
+                );
+              }
+              return formatConfirmation(
+                `Image [${removed.index}] ${removed.removed} removed from "${exercise.name}". ${removed.images.length} image(s) remain; the file was kept.`
               );
             }
 
@@ -1373,6 +1883,14 @@ Workout formats (workout_format, default standard) drive the in-app timer:
                 text += '#### Instructions\n';
                 exercise.instructions.forEach((ins, i) => {
                   text += `${i + 1}. ${ins}\n`;
+                });
+              }
+
+              if (exercise.images.length > 0) {
+                if (exercise.instructions.length > 0) text += '\n';
+                text += '#### Images (index: path)\n';
+                exercise.images.forEach((imagePath, i) => {
+                  text += `- [${i}] ${imagePath}\n`;
                 });
               }
 

@@ -13,6 +13,12 @@ import fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 
 vi.mock('../config/logging.js', () => ({ log: vi.fn() }));
+// The guarded dispatcher resolves names through this at connect time; the
+// user-supplied-URL tests below feed it private answers so no request leaves.
+vi.mock('node:dns/promises', () => {
+  const lookup = vi.fn();
+  return { default: { lookup }, lookup };
+});
 
 // Point downloads at a scratch dir before the module reads the env at import,
 // then restore it so this value doesn't leak into other test files' fresh
@@ -21,7 +27,11 @@ const TMP_UPLOADS = path.join(os.tmpdir(), `sparky-imgdl-test-${process.pid}`);
 const priorUploadsDir = process.env.SPARKY_FITNESS_CUSTOM_UPLOADS_DIRECTORY;
 process.env.SPARKY_FITNESS_CUSTOM_UPLOADS_DIRECTORY = TMP_UPLOADS;
 
-const { downloadImage } = await import('../utils/imageDownloader.js');
+const { downloadImage, downloadUserSuppliedImage } =
+  await import('../utils/imageDownloader.js');
+const { isOutboundUrlBlockedError } =
+  await import('../utils/outboundUrlPolicy.js');
+const dns = (await import('node:dns/promises')).default;
 
 if (priorUploadsDir === undefined) {
   delete process.env.SPARKY_FITNESS_CUSTOM_UPLOADS_DIRECTORY;
@@ -289,4 +299,254 @@ describe('imageDownloader - downloadImage', () => {
       )
     ).toBe(false);
   });
+});
+
+const PNG_BYTES = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.from('rest-of-png'),
+]);
+const JPEG_BYTES = Buffer.concat([
+  Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+  Buffer.from('rest-of-jpeg'),
+]);
+
+async function filesIn(entityId: string): Promise<string[]> {
+  return fsp
+    .readdir(path.join(TMP_UPLOADS, 'exercises', entityId))
+    .catch(() => []);
+}
+
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error('expected the download to fail');
+}
+
+describe('imageDownloader - downloadUserSuppliedImage', () => {
+  it('saves a real PNG under a generated name', async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        imageResponse(PNG_BYTES, { 'content-type': 'image/png' })
+      );
+
+    const result = await downloadUserSuppliedImage(
+      'https://cdn.example.com/My%20Photo.png',
+      'ux-ok',
+      'exercises'
+    );
+
+    expect(result).toMatch(/^\/uploads\/exercises\/ux-ok\/[0-9a-f-]{36}\.png$/);
+    const written = await fsp.readFile(
+      path.join(TMP_UPLOADS, 'exercises', 'ux-ok', path.basename(result))
+    );
+    expect(written.equals(PNG_BYTES)).toBe(true);
+  });
+
+  it('passes an abort signal so the download is time-limited', async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        imageResponse(PNG_BYTES, { 'content-type': 'image/png' })
+      );
+
+    await downloadUserSuppliedImage(
+      'https://cdn.example.com/a.png',
+      'ux-signal',
+      'exercises'
+    );
+
+    const init = vi.mocked(globalThis.fetch).mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.redirect).toBe('manual');
+  });
+
+  it('rejects HTML served as image/png (magic bytes) and writes nothing', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      imageResponse('<html><script>alert(1)</script></html>', {
+        'content-type': 'image/png',
+      })
+    );
+
+    await expect(
+      downloadUserSuppliedImage(
+        'https://cdn.example.com/fake.png',
+        'ux-magic',
+        'exercises'
+      )
+    ).rejects.toThrow(/does not match its content-type/);
+    expect(await filesIn('ux-magic')).toEqual([]);
+  });
+
+  it('rejects a JPEG body labelled as PNG', async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        imageResponse(JPEG_BYTES, { 'content-type': 'image/png' })
+      );
+
+    await expect(
+      downloadUserSuppliedImage(
+        'https://cdn.example.com/x.png',
+        'ux-mismatch',
+        'exercises'
+      )
+    ).rejects.toThrow(/detected image\/jpeg/);
+    expect(await filesIn('ux-mismatch')).toEqual([]);
+  });
+
+  it('rejects an empty body', async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(imageResponse('', { 'content-type': 'image/png' }));
+
+    await expect(
+      downloadUserSuppliedImage(
+        'https://cdn.example.com/empty.png',
+        'ux-empty',
+        'exercises'
+      )
+    ).rejects.toThrow(/does not match its content-type/);
+  });
+
+  it('rejects a non-image content-type', async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        imageResponse(PNG_BYTES, { 'content-type': 'image/svg+xml' })
+      );
+
+    await expect(
+      downloadUserSuppliedImage(
+        'https://cdn.example.com/x.svg',
+        'ux-svg',
+        'exercises'
+      )
+    ).rejects.toThrow(/disallowed content-type/);
+  });
+
+  it('rejects an oversize image streamed without a declared length', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(PNG_BYTES));
+        controller.enqueue(new Uint8Array(11 * MB));
+        controller.close();
+      },
+    });
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        imageResponse(stream, { 'content-type': 'image/png' })
+      );
+
+    await expect(
+      downloadUserSuppliedImage(
+        'https://cdn.example.com/huge.png',
+        'ux-huge',
+        'exercises'
+      )
+    ).rejects.toThrow(/exceeds maximum size/);
+    expect(await filesIn('ux-huge')).toEqual([]);
+  });
+
+  it.each([
+    'http://127.0.0.1/a.png',
+    'http://localhost/a.png',
+    'http://10.0.0.8/a.png',
+    'http://192.168.1.1/a.png',
+    'http://169.254.169.254/latest/meta-data/',
+    'http://[::1]/a.png',
+    'http://[fd00:ec2::254]/a.png',
+    'http://[::ffff:127.0.0.1]/a.png',
+    'file:///etc/passwd',
+    'ftp://cdn.example.com/a.png',
+    'https://user:pass@cdn.example.com/a.png',
+  ])('refuses %s before any request', async (url) => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy;
+
+    await expect(
+      downloadUserSuppliedImage(url, 'ux-ssrf', 'exercises')
+    ).rejects.toThrow();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['http://127.0.0.1/internal.png'],
+    ['http://169.254.169.254/latest/meta-data/'],
+    ['http://localhost:8080/admin'],
+    ['file:///etc/passwd'],
+  ])('refuses a redirect to %s without following it', async (location) => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(null, { status: 302, headers: { location } })
+      );
+
+    await expect(
+      downloadUserSuppliedImage(
+        'https://cdn.example.com/start.png',
+        'ux-redirect',
+        'exercises'
+      )
+    ).rejects.toThrow();
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops after the redirect cap', async () => {
+    globalThis.fetch = vi.fn().mockImplementation(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://cdn.example.com/again.png' },
+        })
+    );
+
+    await expect(
+      downloadUserSuppliedImage(
+        'https://cdn.example.com/loop.png',
+        'ux-loop',
+        'exercises'
+      )
+    ).rejects.toThrow(/redirect limit/);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(6);
+  });
+
+  // These use the real fetch and guarded dispatcher: the name check happens
+  // when the connection is opened, against the DNS answer.
+  it.each([
+    [[{ address: '10.1.2.3', family: 4 }]],
+    [[{ address: '169.254.169.254', family: 4 }]],
+    [[{ address: '::1', family: 6 }]],
+    // One private answer is enough to refuse, even beside a public one.
+    [
+      [
+        { address: '93.184.216.34', family: 4 },
+        { address: '127.0.0.1', family: 4 },
+      ],
+    ],
+  ])(
+    'refuses a hostname whose DNS answer is private (%j)',
+    async (addresses) => {
+      vi.mocked(dns.lookup).mockResolvedValue(addresses as never);
+
+      const error = await rejection(
+        downloadUserSuppliedImage(
+          'http://rebind.example.test/a.png',
+          'ux-dns',
+          'exercises'
+        )
+      );
+
+      expect(isOutboundUrlBlockedError(error)).toBe(true);
+      expect(dns.lookup).toHaveBeenCalledWith(
+        'rebind.example.test',
+        expect.objectContaining({ all: true })
+      );
+      expect(await filesIn('ux-dns')).toEqual([]);
+    }
+  );
 });

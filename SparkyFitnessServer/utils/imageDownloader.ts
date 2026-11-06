@@ -41,12 +41,79 @@ const IMAGE_CONTENT_TYPE_EXTENSIONS = new Map<string, readonly string[]>([
   ['image/webp', ['.webp']],
 ]);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+// Enough leading bytes to recognize every allowed type (WebP needs 12).
+const MAGIC_SNIFF_BYTES = 12;
+const USER_SUPPLIED_TIMEOUT_MS = 15_000;
 
-async function fetchImageResponse(imageUrl: string): Promise<Response> {
+/**
+ * Extra checks for a URL a person (or the assistant on their behalf) typed in,
+ * rather than one an exercise/food provider returned.
+ * - `timeoutMs` bounds the whole download, redirects and body included.
+ * - `verifyMagicBytes` refuses a body whose leading bytes are not the image
+ *   type the server declared, so an HTML page labelled image/png is not saved.
+ * - `generatedFileName` names the file with a random UUID instead of the
+ *   source URL's basename.
+ */
+interface DownloadImageOptions {
+  timeoutMs?: number;
+  verifyMagicBytes?: boolean;
+  generatedFileName?: boolean;
+}
+
+function sniffImageType(head: Buffer): string | null {
+  if (
+    head.length >= 8 &&
+    head
+      .subarray(0, 8)
+      .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return 'image/png';
+  }
+  if (
+    head.length >= 3 &&
+    head[0] === 0xff &&
+    head[1] === 0xd8 &&
+    head[2] === 0xff
+  ) {
+    return 'image/jpeg';
+  }
+  const ascii = head.subarray(0, 12).toString('latin1');
+  if (ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a')) {
+    return 'image/gif';
+  }
+  if (
+    head.length >= 12 &&
+    ascii.startsWith('RIFF') &&
+    ascii.slice(8, 12) === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return null;
+}
+
+function assertMagicBytesMatch(head: Buffer, contentType: string): void {
+  const sniffed = sniffImageType(head);
+  if (sniffed !== contentType) {
+    throw new Error(
+      `[imageDownloader] Image content does not match its content-type ${contentType} (detected ${sniffed ?? 'unknown'})`
+    );
+  }
+}
+
+async function fetchImageResponse(
+  imageUrl: string,
+  signal?: AbortSignal
+): Promise<Response> {
   let currentUrl = imageUrl;
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
-    const response = await guardedFetch(currentUrl);
+    // Each hop goes back through the guarded fetch, so a redirect target is
+    // re-checked (scheme, literal address, DNS answer at connect) like the
+    // original URL.
+    const response = await guardedFetch(
+      currentUrl,
+      signal ? { signal } : undefined
+    );
     if (!REDIRECT_STATUSES.has(response.status)) {
       return response;
     }
@@ -70,12 +137,19 @@ async function fetchImageResponse(imageUrl: string): Promise<Response> {
   throw new Error('[imageDownloader] Image redirect resolution failed');
 }
 
-function resolveImageFileName(imageUrl: string, contentType: string): string {
+function resolveImageFileName(
+  imageUrl: string,
+  contentType: string,
+  generated = false
+): string {
   const allowedExtensions = IMAGE_CONTENT_TYPE_EXTENSIONS.get(contentType);
   if (!allowedExtensions) {
     throw new Error(
       `[imageDownloader] Rejected image with disallowed content-type: ${contentType || '(none)'}`
     );
+  }
+  if (generated) {
+    return `${crypto.randomUUID()}${allowedExtensions[0]}`;
   }
 
   const sourceName = path.basename(new URL(imageUrl).pathname);
@@ -122,17 +196,22 @@ async function ensureUploadsDir(domain: ImageDomain) {
  * @param imageUrl - The URL of the image to download.
  * @param entityId - The ID of the owning entity, used for creating a subdirectory.
  * @param domain - Which uploads subdirectory the image belongs to.
+ * @param options - Stricter checks for user-supplied URLs.
  * @returns The web-accessible path to the downloaded image.
  */
 async function downloadImage(
   imageUrl: string,
   entityId: string,
-  domain: ImageDomain = 'exercises'
+  domain: ImageDomain = 'exercises',
+  options: DownloadImageOptions = {}
 ): Promise<string> {
   await ensureUploadsDir(domain);
 
   try {
-    const response = await fetchImageResponse(imageUrl);
+    const signal = options.timeoutMs
+      ? AbortSignal.timeout(options.timeoutMs)
+      : undefined;
+    const response = await fetchImageResponse(imageUrl, signal);
     if (!response.ok) {
       throw new Error(
         `[imageDownloader] Upstream returned status ${response.status}`
@@ -143,7 +222,11 @@ async function downloadImage(
       .split(';')[0]
       .trim()
       .toLowerCase();
-    const imageFileName = resolveImageFileName(imageUrl, contentType);
+    const imageFileName = resolveImageFileName(
+      imageUrl,
+      contentType,
+      options.generatedFileName
+    );
     const entityUploadDir = path.join(domainUploadsDir(domain), entityId);
     const localImagePath = path.join(entityUploadDir, imageFileName);
 
@@ -177,12 +260,49 @@ async function downloadImage(
       }
     }
 
+    // Holds back the first bytes until they are checked, so nothing that
+    // fails the sniff is ever written.
+    async function* enforceMagicBytes(chunks: AsyncIterable<Buffer>) {
+      let head: Buffer[] = [];
+      let headLength = 0;
+      let checked = false;
+      for await (const chunk of chunks) {
+        if (checked) {
+          yield chunk;
+          continue;
+        }
+        head.push(chunk);
+        headLength += chunk.length;
+        if (headLength >= MAGIC_SNIFF_BYTES) {
+          const buffered = Buffer.concat(head);
+          assertMagicBytesMatch(buffered, contentType);
+          checked = true;
+          head = [];
+          yield buffered;
+        }
+      }
+      if (!checked) {
+        const buffered = Buffer.concat(head);
+        assertMagicBytesMatch(buffered, contentType);
+        yield buffered;
+      }
+    }
+
     try {
-      await pipeline(
-        source,
-        enforceSizeLimit,
-        fs.createWriteStream(localImagePath)
-      );
+      if (options.verifyMagicBytes) {
+        await pipeline(
+          source,
+          enforceSizeLimit,
+          enforceMagicBytes,
+          fs.createWriteStream(localImagePath)
+        );
+      } else {
+        await pipeline(
+          source,
+          enforceSizeLimit,
+          fs.createWriteStream(localImagePath)
+        );
+      }
     } catch (streamError) {
       await fsp.unlink(localImagePath).catch(() => {});
       throw streamError;
@@ -198,8 +318,27 @@ async function downloadImage(
     throw error;
   }
 }
-export { downloadImage };
+/**
+ * Downloads an image from a URL a person supplied: public hosts only (checked
+ * at every redirect and pinned at connect), a 15 s overall timeout, the 10 MB
+ * cap, an allowed raster content-type whose leading bytes agree, and a random
+ * file name.
+ */
+function downloadUserSuppliedImage(
+  imageUrl: string,
+  entityId: string,
+  domain: ImageDomain
+): Promise<string> {
+  return downloadImage(imageUrl, entityId, domain, {
+    timeoutMs: USER_SUPPLIED_TIMEOUT_MS,
+    verifyMagicBytes: true,
+    generatedFileName: true,
+  });
+}
+
+export { downloadImage, downloadUserSuppliedImage };
 export type { ImageDomain };
 export default {
   downloadImage,
+  downloadUserSuppliedImage,
 };
