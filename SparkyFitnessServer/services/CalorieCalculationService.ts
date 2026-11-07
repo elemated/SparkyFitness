@@ -62,14 +62,16 @@ async function estimateCaloriesBurnedPerHour(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   sets: any
 ) {
-  // If exercise has a pre-defined calories_per_hour, use it directly for cardio
   const categoryName =
     exercise.category && typeof exercise.category === 'object'
       ? exercise.category.name
       : exercise.category;
   const category = categoryName ? categoryName.toLowerCase() : 'default';
-  if (category === 'cardio' && exercise.calories_per_hour) {
-    return exercise.calories_per_hour;
+  // A positive library rate wins for every category. 0, null or missing means
+  // "no rate set", so the MET estimate below still applies.
+  const libraryRate = Number(exercise.calories_per_hour);
+  if (Number.isFinite(libraryRate) && libraryRate > 0) {
+    return libraryRate;
   }
   let userWeightKg = 70; // Default to 70kg if user weight not found
   let age = 30; // Default age
