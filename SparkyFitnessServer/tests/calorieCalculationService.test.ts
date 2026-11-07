@@ -44,6 +44,27 @@ describe('estimateCaloriesBurnedPerHour', () => {
     expect(result).toBe(600);
   });
 
+  it('honors a positive library rate for non-cardio exercises', async () => {
+    const result = await estimateCaloriesBurnedPerHour(
+      { category: 'strength', level: 'intermediate', calories_per_hour: 50 },
+      USER_ID,
+      []
+    );
+    expect(result).toBe(50);
+  });
+
+  it.each([0, null, undefined, '0'])(
+    'falls back to the MET estimate when the library rate is %s',
+    async (rate) => {
+      const result = await estimateCaloriesBurnedPerHour(
+        { ...strengthExercise, calories_per_hour: rate },
+        USER_ID,
+        []
+      );
+      expect(result).toBe(calsForMet(5));
+    }
+  );
+
   it('rates straight working sets by their per-set Brzycki intensity', async () => {
     // 3x8 at 100kg: per-set 1RM = 100 / (1.0278 - 0.0278 * 8) ~= 124.2,
     // intensity ~= 0.81 -> MET 5.5. Feeding the 24 total reps into Brzycki

@@ -463,6 +463,14 @@ const exerciseTagListSchema = z.union([
   z.string().max(2000),
 ]);
 
+// wger-style values used by existing rows. level also keys the MET table in
+// CalorieCalculationService, so a stray value would silently fall back.
+const EXERCISE_LEVELS = ['beginner', 'intermediate', 'expert'] as const;
+const EXERCISE_FORCES = ['static', 'pull', 'push'] as const;
+const EXERCISE_MECHANICS = ['isolation', 'compound'] as const;
+const lowercased = (v: unknown) =>
+  typeof v === 'string' ? v.trim().toLowerCase() : v;
+
 const updateExerciseSchema = z
   .object({
     action: z.literal('update_exercise'),
@@ -492,6 +500,63 @@ const updateExerciseSchema = z
     secondary_muscles: exerciseTagListSchema
       .optional()
       .describe('Replacement secondary muscles list'),
+    instructions: z
+      .union([
+        z.array(z.string().min(1).max(1000)).max(50),
+        z.string().max(10000),
+      ])
+      .optional()
+      .describe(
+        'Replacement instruction steps: an array, or a string with one step per line (commas are kept inside a step)'
+      ),
+    modality: z
+      .enum(EXERCISE_MODALITIES)
+      .optional()
+      .describe('New set editor type'),
+    level: z
+      .preprocess(lowercased, z.enum(EXERCISE_LEVELS))
+      .optional()
+      .describe('New level: beginner, intermediate or expert'),
+    force: z
+      .preprocess(lowercased, z.enum(EXERCISE_FORCES))
+      .optional()
+      .describe('New force type: static, pull or push'),
+    mechanic: z
+      .preprocess(lowercased, z.enum(EXERCISE_MECHANICS))
+      .optional()
+      .describe('New mechanic type: isolation or compound'),
+  })
+  .strict();
+
+const EXERCISE_DELETE_MODES = [
+  'hide',
+  'delete',
+  'delete_with_history',
+] as const;
+
+const deleteExerciseSchema = z
+  .object({
+    action: z.literal('delete_exercise'),
+    exercise_id: uuidSchema.optional().describe('UUID of the exercise'),
+    exercise_name: z
+      .string()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe('Exact name of the exercise (alternative to ID)'),
+    confirmed: confirmedSchema,
+    delete_mode: z
+      .enum(EXERCISE_DELETE_MODES)
+      .optional()
+      .describe(
+        'hide (stops showing in search), delete (default: removes the library row, keeps diary entries) or delete_with_history (also deletes your diary entries; needs confirm_delete_history=true)'
+      ),
+    confirm_delete_history: z
+      .boolean()
+      .optional()
+      .describe(
+        'Must be true to run delete_with_history, which permanently deletes diary entries'
+      ),
   })
   .strict();
 
@@ -753,6 +818,7 @@ export const manageExerciseSchema = z.discriminatedUnion('action', [
   getExerciseDetailsSchema,
   duplicateExerciseSchema,
   updateExerciseSchema,
+  deleteExerciseSchema,
   syncExerciseEntriesSchema,
   addExerciseImageSchema,
   removeExerciseImageSchema,
@@ -785,6 +851,7 @@ export const manageExerciseInput = z.object({
       'get_exercise_details',
       'duplicate_exercise',
       'update_exercise',
+      'delete_exercise',
       'sync_exercise_entries',
       'add_exercise_image',
       'remove_exercise_image',
@@ -882,6 +949,36 @@ export const manageExerciseInput = z.object({
     .optional()
     .describe(
       'For update_exercise: comma-separated replacement secondary muscles'
+    ),
+  instructions: z
+    .string()
+    .optional()
+    .describe(
+      'For update_exercise: replacement instruction steps, comma-separated'
+    ),
+  level: z
+    .string()
+    .optional()
+    .describe('For update_exercise: beginner, intermediate or expert'),
+  force: z
+    .string()
+    .optional()
+    .describe('For update_exercise: static, pull or push'),
+  mechanic: z
+    .string()
+    .optional()
+    .describe('For update_exercise: isolation or compound'),
+  delete_mode: z
+    .enum(EXERCISE_DELETE_MODES)
+    .optional()
+    .describe(
+      'For delete_exercise: hide, delete (default; keeps diary entries) or delete_with_history'
+    ),
+  confirm_delete_history: z
+    .boolean()
+    .optional()
+    .describe(
+      'For delete_exercise: must be true for delete_with_history, which permanently deletes diary entries'
     ),
   recompute_calories: z
     .boolean()
@@ -1084,7 +1181,7 @@ export const manageExerciseInput = z.object({
     .boolean()
     .optional()
     .describe(
-      'Must be true to apply update_exercise, sync_exercise_entries, add_exercise_image, remove_exercise_image, update_workout_preset or delete_workout_preset. If omitted or false, the tool returns a preview or confirmation prompt and does not change anything.'
+      'Must be true to apply update_exercise, delete_exercise, sync_exercise_entries, add_exercise_image, remove_exercise_image, update_workout_preset or delete_workout_preset. If omitted or false, the tool returns a preview or confirmation prompt and does not change anything.'
     ),
   // entry management
   entry_id: uuidSchema
