@@ -732,11 +732,13 @@ describe('update_exercise extra fields', () => {
       level: 'beginner',
       force: 'static',
       mechanic: 'isolation',
-      instructions: 'Hold, Breathe',
+      instructions: 'Hold, with a flat back\nBreathe',
     };
     const preview = await run(fields);
     expect(preview).toContain('- modality: weight_reps → reps_only');
-    expect(preview).toContain('- instructions: (none) → Hold, Breathe');
+    expect(preview).toContain(
+      '- instructions: (none) → Hold, with a flat back, Breathe'
+    );
     expect(exerciseService.updateExercise).not.toHaveBeenCalled();
 
     await run({ ...fields, confirmed: true });
@@ -745,7 +747,7 @@ describe('update_exercise extra fields', () => {
       level: 'beginner',
       force: 'static',
       mechanic: 'isolation',
-      instructions: ['Hold', 'Breathe'],
+      instructions: ['Hold, with a flat back', 'Breathe'],
     });
   });
 });
@@ -850,5 +852,36 @@ describe('delete_exercise', () => {
     });
     expect(result).toContain('Only exercises you own can be changed');
     expect(exerciseService.deleteExercise).not.toHaveBeenCalled();
+  });
+});
+
+describe('update_exercise value checks', () => {
+  it('normalizes case and rejects unknown level, force and mechanic values', async () => {
+    givenOwnedExercise();
+    const ok = await run({
+      action: 'update_exercise',
+      exercise_id: EX_ID,
+      level: 'Beginner',
+      force: 'PUSH',
+      mechanic: 'Compound',
+    });
+    expect(ok).toContain('- level: (none) → beginner');
+    const bad = await run({
+      action: 'update_exercise',
+      exercise_id: EX_ID,
+      level: 'advanced',
+    });
+    expect(bad).not.toContain('Preview of changes');
+    expect(exerciseService.updateExercise).not.toHaveBeenCalled();
+  });
+
+  it('accepts instructions as an array without splitting commas', async () => {
+    givenOwnedExercise();
+    const result = await run({
+      action: 'update_exercise',
+      exercise_id: EX_ID,
+      instructions: ['Stand, feet shoulder wide', 'Lift'],
+    });
+    expect(result).toContain('Stand, feet shoulder wide, Lift');
   });
 });

@@ -928,6 +928,13 @@ function toTagList(value: string | string[]): string[] {
   return items.map((item) => item.trim()).filter(Boolean);
 }
 
+// Instruction steps are sentences that contain commas, so a string is split
+// on newlines only.
+function toStepList(value: string | string[]): string[] {
+  const items = Array.isArray(value) ? value : value.split(/\r?\n/);
+  return items.map((item) => item.trim()).filter(Boolean);
+}
+
 function formatKcal(value: number): string {
   return `${Math.round(value * 10) / 10} kcal`;
 }
@@ -1047,7 +1054,7 @@ Actions:
 - update_exercise_entry(entry_id, entry_date?, duration_minutes?, calories_burned?, notes?, distance?, avg_heart_rate?, steps?, sets?) — only the provided fields change; sets, when provided, replace all existing sets
 - delete_exercise_entry(entry_id)
 - get_exercise_details(exercise_id?|exercise_name?) — includes the exercise's images as "[index] path"
-- update_exercise(exercise_id?|exercise_name?, confirmed, name?, category?, calories_per_hour?, description?, equipment?, primary_muscles?, secondary_muscles?, instructions?, modality?, level?, force?, mechanic?) — edits a library exercise the user OWNS (System, public and family-shared exercises are refused; offer duplicate_exercise instead). equipment and muscle lists replace the current list (comma-separated). If several exercises share the name, the tool lists them and changes nothing; ask which one and retry with exercise_id. Without confirmed=true it returns a before/after preview and changes nothing. Never changes logged diary entries.
+- update_exercise(exercise_id?|exercise_name?, confirmed, name?, category?, calories_per_hour?, description?, equipment?, primary_muscles?, secondary_muscles?, instructions? (array or one step per line), modality?, level?, force?, mechanic?) — edits a library exercise the user OWNS (System, public and family-shared exercises are refused; offer duplicate_exercise instead). equipment and muscle lists replace the current list (comma-separated). If several exercises share the name, the tool lists them and changes nothing; ask which one and retry with exercise_id. Without confirmed=true it returns a before/after preview and changes nothing. Never changes logged diary entries.
 - delete_exercise(exercise_id?|exercise_name?, confirmed, delete_mode?:hide|delete|delete_with_history, confirm_delete_history?) — removes a library exercise the user OWNS. Default mode is delete: the library row goes and logged diary entries are kept. hide only stops it showing in search. delete_with_history also permanently deletes the user's diary entries for it and additionally needs confirm_delete_history=true. Without confirmed=true it returns a preview with usage counts and changes nothing.
 - sync_exercise_entries(exercise_id, confirmed, recompute_calories?) — copies the exercise's current name, calories per hour and modality onto the user's own diary entries for it. Without confirmed=true it returns a preview (entry count, calorie total before → after) and changes nothing. recompute_calories=true also sets calories burned to calories_per_hour × duration, but only for entries with a duration and no measured, device-synced or linked calories; those keep their value. Usually run after update_exercise, as a separate step the user agrees to.
 - add_exercise_image(exercise_id, url, confirmed) — downloads a PNG, JPEG, GIF or WebP image (up to 10 MB) from a public http(s) URL and adds it to an exercise the user owns. Private or internal addresses are refused. Without confirmed=true nothing is downloaded.
@@ -1257,7 +1264,7 @@ Workout formats (workout_format, default standard) drive the in-app timer:
               if (args.secondary_muscles !== undefined)
                 requested.secondary_muscles = toTagList(args.secondary_muscles);
               if (args.instructions !== undefined)
-                requested.instructions = toTagList(args.instructions);
+                requested.instructions = toStepList(args.instructions);
               if (args.modality !== undefined)
                 requested.modality = args.modality;
               if (args.level !== undefined) requested.level = args.level;

@@ -463,6 +463,14 @@ const exerciseTagListSchema = z.union([
   z.string().max(2000),
 ]);
 
+// wger-style values used by existing rows. level also keys the MET table in
+// CalorieCalculationService, so a stray value would silently fall back.
+const EXERCISE_LEVELS = ['beginner', 'intermediate', 'expert'] as const;
+const EXERCISE_FORCES = ['static', 'pull', 'push'] as const;
+const EXERCISE_MECHANICS = ['isolation', 'compound'] as const;
+const lowercased = (v: unknown) =>
+  typeof v === 'string' ? v.trim().toLowerCase() : v;
+
 const updateExerciseSchema = z
   .object({
     action: z.literal('update_exercise'),
@@ -492,21 +500,31 @@ const updateExerciseSchema = z
     secondary_muscles: exerciseTagListSchema
       .optional()
       .describe('Replacement secondary muscles list'),
-    instructions: exerciseTagListSchema
+    instructions: z
+      .union([
+        z.array(z.string().min(1).max(1000)).max(50),
+        z.string().max(10000),
+      ])
       .optional()
-      .describe('Replacement instruction steps (one per list item)'),
+      .describe(
+        'Replacement instruction steps: an array, or a string with one step per line (commas are kept inside a step)'
+      ),
     modality: z
       .enum(EXERCISE_MODALITIES)
       .optional()
       .describe('New set editor type'),
-    level: z.string().min(1).max(100).optional().describe('New level'),
-    force: z.string().min(1).max(100).optional().describe('New force type'),
-    mechanic: z
-      .string()
-      .min(1)
-      .max(100)
+    level: z
+      .preprocess(lowercased, z.enum(EXERCISE_LEVELS))
       .optional()
-      .describe('New mechanic type'),
+      .describe('New level: beginner, intermediate or expert'),
+    force: z
+      .preprocess(lowercased, z.enum(EXERCISE_FORCES))
+      .optional()
+      .describe('New force type: static, pull or push'),
+    mechanic: z
+      .preprocess(lowercased, z.enum(EXERCISE_MECHANICS))
+      .optional()
+      .describe('New mechanic type: isolation or compound'),
   })
   .strict();
 
@@ -938,12 +956,18 @@ export const manageExerciseInput = z.object({
     .describe(
       'For update_exercise: replacement instruction steps, comma-separated'
     ),
-  level: z.string().optional().describe('For update_exercise: new level'),
-  force: z.string().optional().describe('For update_exercise: new force type'),
+  level: z
+    .string()
+    .optional()
+    .describe('For update_exercise: beginner, intermediate or expert'),
+  force: z
+    .string()
+    .optional()
+    .describe('For update_exercise: static, pull or push'),
   mechanic: z
     .string()
     .optional()
-    .describe('For update_exercise: new mechanic type'),
+    .describe('For update_exercise: isolation or compound'),
   delete_mode: z
     .enum(EXERCISE_DELETE_MODES)
     .optional()
