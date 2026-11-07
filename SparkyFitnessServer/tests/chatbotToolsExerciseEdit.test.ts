@@ -20,10 +20,11 @@ vi.mock('../services/exerciseService', () => ({
     searchExercises: vi.fn(),
     getExerciseById: vi.fn(),
     updateExercise: vi.fn(),
+    deleteExercise: vi.fn(),
   },
 }));
 vi.mock('../models/exercise', () => ({
-  default: { getExerciseOwnerId: vi.fn() },
+  default: { getExerciseOwnerId: vi.fn(), getExerciseDeletionImpact: vi.fn() },
 }));
 vi.mock('../models/exerciseEntry', () => ({ default: {} }));
 vi.mock('../models/workoutPresetRepository', () => ({ default: {} }));
@@ -710,5 +711,144 @@ describe('get_exercise_details images', () => {
         '- [0] /uploads/exercises/a.png\n' +
         '- [1] /uploads/exercises/b.png\n'
     );
+  });
+});
+
+describe('update_exercise extra fields', () => {
+  it('previews and applies modality, level, force, mechanic and instructions', async () => {
+    givenOwnedExercise();
+    vi.mocked(exerciseService.updateExercise).mockResolvedValue({
+      ...OWNED_ROW,
+      modality: 'reps_only',
+      level: 'beginner',
+      force: 'static',
+      mechanic: 'isolation',
+      instructions: '["Hold","Breathe"]',
+    });
+    const fields = {
+      action: 'update_exercise',
+      exercise_id: EX_ID,
+      modality: 'reps_only',
+      level: 'beginner',
+      force: 'static',
+      mechanic: 'isolation',
+      instructions: 'Hold, Breathe',
+    };
+    const preview = await run(fields);
+    expect(preview).toContain('- modality: weight_reps → reps_only');
+    expect(preview).toContain('- instructions: (none) → Hold, Breathe');
+    expect(exerciseService.updateExercise).not.toHaveBeenCalled();
+
+    await run({ ...fields, confirmed: true });
+    expect(exerciseService.updateExercise).toHaveBeenCalledWith(USER, EX_ID, {
+      modality: 'reps_only',
+      level: 'beginner',
+      force: 'static',
+      mechanic: 'isolation',
+      instructions: ['Hold', 'Breathe'],
+    });
+  });
+});
+
+describe('delete_exercise', () => {
+  const IMPACT = {
+    exerciseEntriesCount: 2,
+    workoutPresetsCount: 1,
+    workoutPlansCount: 0,
+    currentUserReferences: 3,
+    otherUserReferences: 0,
+  };
+
+  beforeEach(() => {
+    givenOwnedExercise();
+    vi.mocked(exerciseDb.getExerciseDeletionImpact).mockResolvedValue(IMPACT);
+  });
+
+  it('previews a plain delete by default and deletes nothing', async () => {
+    const result = await run({ action: 'delete_exercise', exercise_id: EX_ID });
+    expect(result).toContain('Preview: delete "Bench Press"');
+    expect(result).toContain('2 diary entries');
+    expect(result).toContain('Logged diary entries are kept');
+    expect(result).toContain('Nothing was changed.');
+    expect(exerciseService.deleteExercise).not.toHaveBeenCalled();
+  });
+
+  it('deletes with mode delete when confirmed', async () => {
+    vi.mocked(exerciseService.deleteExercise).mockResolvedValue({
+      message:
+        'Exercise deleted. Your logged workouts are preserved in the diary.',
+      status: 'deleted',
+    });
+    const result = await run({
+      action: 'delete_exercise',
+      exercise_id: EX_ID,
+      confirmed: true,
+    });
+    expect(exerciseService.deleteExercise).toHaveBeenCalledWith(
+      USER,
+      EX_ID,
+      'delete'
+    );
+    expect(result).toContain('preserved in the diary');
+  });
+
+  it('supports hide', async () => {
+    vi.mocked(exerciseService.deleteExercise).mockResolvedValue({
+      message: 'Exercise hidden.',
+      status: 'hidden',
+    });
+    await run({
+      action: 'delete_exercise',
+      exercise_id: EX_ID,
+      delete_mode: 'hide',
+      confirmed: true,
+    });
+    expect(exerciseService.deleteExercise).toHaveBeenCalledWith(
+      USER,
+      EX_ID,
+      'hide'
+    );
+  });
+
+  it('refuses delete_with_history without confirm_delete_history', async () => {
+    const result = await run({
+      action: 'delete_exercise',
+      exercise_id: EX_ID,
+      delete_mode: 'delete_with_history',
+      confirmed: true,
+    });
+    expect(result).toContain('explicit go-ahead');
+    expect(result).toContain('would permanently delete 2 diary entries');
+    expect(exerciseService.deleteExercise).not.toHaveBeenCalled();
+  });
+
+  it('runs delete_with_history only with both flags', async () => {
+    vi.mocked(exerciseService.deleteExercise).mockResolvedValue({
+      message: 'Exercise deleted along with 2 of your diary entries.',
+      status: 'deleted_with_history',
+    });
+    await run({
+      action: 'delete_exercise',
+      exercise_id: EX_ID,
+      delete_mode: 'delete_with_history',
+      confirmed: true,
+      confirm_delete_history: true,
+    });
+    expect(exerciseService.deleteExercise).toHaveBeenCalledWith(
+      USER,
+      EX_ID,
+      'delete_with_history'
+    );
+  });
+
+  it('refuses exercises the user does not own', async () => {
+    givenOwnedExercise({ ...OWNED_ROW, user_id: null });
+    const result = await run({
+      action: 'delete_exercise',
+      exercise_id: EX_ID,
+      confirmed: true,
+    });
+    expect(result).toContain('Only exercises you own can be changed');
+    expect(exerciseService.deleteExercise).not.toHaveBeenCalled();
   });
 });

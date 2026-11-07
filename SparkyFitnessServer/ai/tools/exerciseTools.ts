@@ -86,6 +86,7 @@ const VALID_ACTIONS = [
   'delete_exercise_entry',
   'get_exercise_details',
   'update_exercise',
+  'delete_exercise',
   'sync_exercise_entries',
   'add_exercise_image',
   'remove_exercise_image',
@@ -758,6 +759,10 @@ interface EditableExerciseRow {
   equipment?: unknown;
   primary_muscles?: unknown;
   secondary_muscles?: unknown;
+  instructions?: unknown;
+  level?: string | null;
+  force?: string | null;
+  mechanic?: string | null;
   images?: unknown;
   user_id?: string | null;
   shared_with_public?: boolean | null;
@@ -870,12 +875,18 @@ type ExerciseEditField =
   | 'description'
   | 'equipment'
   | 'primary_muscles'
-  | 'secondary_muscles';
+  | 'secondary_muscles'
+  | 'instructions'
+  | 'modality'
+  | 'level'
+  | 'force'
+  | 'mechanic';
 
 const EXERCISE_LIST_FIELDS: readonly ExerciseEditField[] = [
   'equipment',
   'primary_muscles',
   'secondary_muscles',
+  'instructions',
 ];
 
 type ExerciseFieldValue = string | number | string[] | null;
@@ -1036,7 +1047,8 @@ Actions:
 - update_exercise_entry(entry_id, entry_date?, duration_minutes?, calories_burned?, notes?, distance?, avg_heart_rate?, steps?, sets?) — only the provided fields change; sets, when provided, replace all existing sets
 - delete_exercise_entry(entry_id)
 - get_exercise_details(exercise_id?|exercise_name?) — includes the exercise's images as "[index] path"
-- update_exercise(exercise_id?|exercise_name?, confirmed, name?, category?, calories_per_hour?, description?, equipment?, primary_muscles?, secondary_muscles?) — edits a library exercise the user OWNS (System, public and family-shared exercises are refused; offer duplicate_exercise instead). equipment and muscle lists replace the current list (comma-separated). If several exercises share the name, the tool lists them and changes nothing; ask which one and retry with exercise_id. Without confirmed=true it returns a before/after preview and changes nothing. Never changes logged diary entries.
+- update_exercise(exercise_id?|exercise_name?, confirmed, name?, category?, calories_per_hour?, description?, equipment?, primary_muscles?, secondary_muscles?, instructions?, modality?, level?, force?, mechanic?) — edits a library exercise the user OWNS (System, public and family-shared exercises are refused; offer duplicate_exercise instead). equipment and muscle lists replace the current list (comma-separated). If several exercises share the name, the tool lists them and changes nothing; ask which one and retry with exercise_id. Without confirmed=true it returns a before/after preview and changes nothing. Never changes logged diary entries.
+- delete_exercise(exercise_id?|exercise_name?, confirmed, delete_mode?:hide|delete|delete_with_history, confirm_delete_history?) — removes a library exercise the user OWNS. Default mode is delete: the library row goes and logged diary entries are kept. hide only stops it showing in search. delete_with_history also permanently deletes the user's diary entries for it and additionally needs confirm_delete_history=true. Without confirmed=true it returns a preview with usage counts and changes nothing.
 - sync_exercise_entries(exercise_id, confirmed, recompute_calories?) — copies the exercise's current name, calories per hour and modality onto the user's own diary entries for it. Without confirmed=true it returns a preview (entry count, calorie total before → after) and changes nothing. recompute_calories=true also sets calories burned to calories_per_hour × duration, but only for entries with a duration and no measured, device-synced or linked calories; those keep their value. Usually run after update_exercise, as a separate step the user agrees to.
 - add_exercise_image(exercise_id, url, confirmed) — downloads a PNG, JPEG, GIF or WebP image (up to 10 MB) from a public http(s) URL and adds it to an exercise the user owns. Private or internal addresses are refused. Without confirmed=true nothing is downloaded.
 - remove_exercise_image(exercise_id, path?|index?, confirmed) — removes one image reference (index and path from get_exercise_details) from an exercise the user owns; the file itself is kept. Without confirmed=true it returns a preview.
@@ -1244,12 +1256,20 @@ Workout formats (workout_format, default standard) drive the in-app timer:
                 requested.primary_muscles = toTagList(args.primary_muscles);
               if (args.secondary_muscles !== undefined)
                 requested.secondary_muscles = toTagList(args.secondary_muscles);
+              if (args.instructions !== undefined)
+                requested.instructions = toTagList(args.instructions);
+              if (args.modality !== undefined)
+                requested.modality = args.modality;
+              if (args.level !== undefined) requested.level = args.level;
+              if (args.force !== undefined) requested.force = args.force;
+              if (args.mechanic !== undefined)
+                requested.mechanic = args.mechanic;
               const requestedFields = Object.keys(
                 requested
               ) as ExerciseEditField[];
               if (requestedFields.length === 0) {
                 return ERRORS.VALIDATION(
-                  'Provide at least one field to change: name, category, calories_per_hour, description, equipment, primary_muscles or secondary_muscles'
+                  'Provide at least one field to change: name, category, calories_per_hour, description, equipment, primary_muscles, secondary_muscles, instructions, modality, level, force or mechanic'
                 );
               }
 
@@ -1292,6 +1312,56 @@ Workout formats (workout_format, default standard) drive the in-app timer:
                 ) +
                 `\n${formatFieldChanges(applied)}\n\n` +
                 'Diary entries were not changed. To copy the new name or calories per hour onto logged entries, use sync_exercise_entries.'
+              );
+            }
+
+            case 'delete_exercise': {
+              const resolved = await resolveOwnedExercise(
+                userId,
+                args,
+                'delete_exercise'
+              );
+              if (!resolved.exercise) return resolved.text;
+              const exercise = resolved.exercise;
+              const mode = args.delete_mode ?? 'delete';
+              const impact = await exerciseDb.getExerciseDeletionImpact(
+                exercise.id,
+                userId
+              );
+              const usage =
+                `${impact.currentUserReferences} of your references (` +
+                `${impact.exerciseEntriesCount} diary entries, ` +
+                `${impact.workoutPresetsCount} presets, ` +
+                `${impact.workoutPlansCount} plan slots)`;
+              const modeText =
+                mode === 'hide'
+                  ? 'It will be hidden from search; nothing else changes.'
+                  : mode === 'delete'
+                    ? 'The library row will be removed. Logged diary entries are kept with their own name and calories, and lose only the link to the library row. Presets and plans that use it lose the exercise.'
+                    : 'The library row AND your diary entries for it will be permanently deleted.';
+
+              if (
+                mode === 'delete_with_history' &&
+                args.confirm_delete_history !== true
+              ) {
+                return (
+                  `Preview: delete_with_history on \"${exercise.name}\" (ID: ${exercise.id}) would permanently delete ${impact.exerciseEntriesCount} diary entries. ${usage}.\n\n` +
+                  "This needs the user's explicit go-ahead. Call delete_exercise again with confirmed=true and confirm_delete_history=true. Nothing was changed."
+                );
+              }
+              if (args.confirmed !== true) {
+                return (
+                  `Preview: ${mode} \"${exercise.name}\" (ID: ${exercise.id}). ${usage}. ${modeText}\n\n` +
+                  'Confirm with the user first. If they agree, call delete_exercise again with the same fields and confirmed=true. Nothing was changed.'
+                );
+              }
+              const result = await exerciseService.deleteExercise(
+                userId,
+                exercise.id,
+                mode
+              );
+              return formatConfirmation(
+                `${result.message} (\"${exercise.name}\", ID: ${exercise.id})`
               );
             }
 
