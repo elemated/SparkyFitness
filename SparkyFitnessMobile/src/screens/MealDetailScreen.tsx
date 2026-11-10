@@ -11,6 +11,7 @@ import { NoteMarkdown } from '../components/NoteMarkdown';
 import { usableFoodImages } from '../utils/foodImages';
 import SegmentedControl from '../components/SegmentedControl';
 import StatusView from '../components/StatusView';
+import ServerGate from '../components/ServerGate';
 import { useActiveWorkoutBarPadding } from '../components/ActiveWorkoutBar';
 import {
   useDeleteMeal,
@@ -26,9 +27,14 @@ import { mealToFoodInfo } from '../types/foodInfo';
 import type { FoodDisplayValues } from '../utils/foodDetails';
 import type { Meal, MealFood } from '../types/meals';
 import type { RootStackScreenProps } from '../types/navigation';
+import AddNfcTagRow from '../components/AddNfcTagRow';
+import { useActionTagsQuery } from '../hooks/useActionTags';
+import { useNfcSupport } from '../hooks/useNfcSupport';
 import { useScreenHeader, type HeaderItem } from '../hooks/useScreenHeader';
 import { useNativeIOSHeadersActive } from '../services/nativeTabBarPreference';
 import { formatLocalizedNumber } from '../localization';
+import { energyUnitLabel, roundedEnergy } from '../utils/energyUnit';
+import { useEnergyUnit } from '../hooks/useEnergyUnit';
 
 type MealDetailScreenProps = RootStackScreenProps<'MealDetail'>;
 
@@ -122,6 +128,7 @@ const MealDetailScreen: React.FC<MealDetailScreenProps> = ({
   route,
 }) => {
   const { t } = useTranslation();
+  const energyUnit = useEnergyUnit();
   const { mealId, initialMeal } = route.params;
   const insets = useSafeAreaInsets();
   const usesNativeHeader = useNativeIOSHeadersActive();
@@ -129,7 +136,7 @@ const MealDetailScreen: React.FC<MealDetailScreenProps> = ({
   const textMuted = useCSSVariable('--color-text-muted') as string;
   const [viewMode, setViewMode] = useState<ViewMode>('perServing');
 
-  const { isConnected, isLoading: isConnectionLoading } = useServerConnection();
+  const { isConnected } = useServerConnection();
   const { profile } = useProfile();
   const { preferences } = usePreferences({ enabled: isConnected });
   const showNetCarbs = preferences?.show_net_carbs === true;
@@ -143,6 +150,15 @@ const MealDetailScreen: React.FC<MealDetailScreenProps> = ({
   });
 
   const canManageMeal = !!(isConnected && meal && profile?.id === meal.user_id);
+
+  // NFC tags that log this meal (#941), offered on a phone with NFC.
+  const { supported: nfcSupported } = useNfcSupport();
+  const canAddNfcTag = isConnected && nfcSupported;
+  const { tags: actionTags } = useActionTagsQuery({ enabled: canAddNfcTag });
+  const tagsForMeal = actionTags.filter(
+    (tag) =>
+      tag.action.type === 'meal' && tag.action.meal_template_id === mealId
+  ).length;
 
   const isPublic = !!meal?.is_public;
   const { updateMeal, isPending: isSharePending } = useUpdateMeal({
@@ -281,31 +297,7 @@ const MealDetailScreen: React.FC<MealDetailScreenProps> = ({
   });
 
   const renderContent = () => {
-    if (!isConnectionLoading && !isConnected) {
-      return (
-        <StatusView
-          icon="cloud-offline"
-          iconTone="muted"
-          iconSize={64}
-          title={t('mealDetail.noServer', {
-            defaultValue: 'No server configured',
-          })}
-          subtitle={t('mealDetail.configureServer', {
-            defaultValue:
-              'Configure your server connection in Settings to view meal details.',
-          })}
-          action={{
-            label: t('screens.library.goToSettings', {
-              defaultValue: 'Go to Settings',
-            }),
-            onPress: () => navigation.navigate('Tabs', { screen: 'Settings' }),
-            variant: 'primary',
-          }}
-        />
-      );
-    }
-
-    if ((isLoading || isConnectionLoading) && !meal) {
+    if (isLoading && !meal) {
       return (
         <StatusView
           loading
@@ -405,7 +397,7 @@ const MealDetailScreen: React.FC<MealDetailScreenProps> = ({
           </View>
           {meal.foods.map((food, index) => {
             const scale = ingredientScale(food);
-            const calories = Math.round(food.calories * scale);
+            const calories = roundedEnergy(food.calories * scale, energyUnit);
             const protein = Math.round(food.protein * scale);
             const carbs = Math.round(food.carbs * scale);
             const fat = Math.round(food.fat * scale);
@@ -456,8 +448,7 @@ const MealDetailScreen: React.FC<MealDetailScreenProps> = ({
                 </View>
                 <View className="items-end">
                   <Text className="text-text-primary text-base font-semibold">
-                    {calories}{' '}
-                    {t('mealDetail.calories', { defaultValue: 'cal' })}
+                    {calories} {energyUnitLabel(energyUnit, t)}
                   </Text>
                   <Text className="text-text-muted text-sm mt-1">
                     {food.quantity} {food.unit}
@@ -527,6 +518,36 @@ const MealDetailScreen: React.FC<MealDetailScreenProps> = ({
           {t('mealDetail.planMeal', { defaultValue: 'Plan Meal' })}
         </Button>
 
+        {canAddNfcTag ? (
+          <AddNfcTagRow
+            className=""
+            onPress={() =>
+              navigation.navigate('ActionTagForm', {
+                presetAction: {
+                  type: 'meal',
+                  meal_template_id: meal.id,
+                  quantity: meal.serving_size || 1,
+                  unit: meal.serving_unit || 'serving',
+                  meal: { mode: 'auto' },
+                },
+              })
+            }
+            subtitle={
+              tagsForMeal > 0
+                ? t('actionTags.meal.count', {
+                    count: tagsForMeal,
+                    formattedCount: formatLocalizedNumber(tagsForMeal),
+                    defaultValue: '{{formattedCount}} tags log this meal',
+                    defaultValue_one: '{{formattedCount}} tag logs this meal',
+                    defaultValue_other: '{{formattedCount}} tags log this meal',
+                  })
+                : t('actionTags.meal.hint', {
+                    defaultValue: 'Tap a sticker to log this meal',
+                  })
+            }
+          />
+        ) : null}
+
         {canManageMeal ? (
           <Button
             variant="destructive"
@@ -549,13 +570,13 @@ const MealDetailScreen: React.FC<MealDetailScreenProps> = ({
   // attaches the large-title collapse to a scroll view it finds at the top of
   // the screen, so wrapping it in another View breaks the inset + collapse.
   if (usesNativeHeader) {
-    return renderContent();
+    return <ServerGate>{renderContent()}</ServerGate>;
   }
 
   return (
     <View className="flex-1 bg-background" style={{ paddingTop: insets.top }}>
       {header}
-      {renderContent()}
+      <ServerGate>{renderContent()}</ServerGate>
     </View>
   );
 };

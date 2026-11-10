@@ -112,6 +112,7 @@ These tables are managed by Better Auth and are not exposed through family shari
 | `exercise_entry_activity_details` | Heart rate, distance, activity data |
 | `shoes` | Running-shoe inventory with retirement mileage; linked from `exercise_entries.shoe_id` |
 | `plate_inventories` | Bars and plates a person owns, for the plate calculator (one row per user) |
+| `action_tags` | NFC tags: a random tag code plus the saved action a tap runs (owner-only) |
 | `exercise_entry_laps` | Lap split intervals for workouts |
 | `exercise_entry_hr_zones` | Heart-rate time-in-zone splits per workout |
 | `exercise_entry_distance_series` | Distance-against-time rows for an indoor entry with no route, behind its pace chart. One row per workout (`points` is JSONB) |
@@ -149,8 +150,10 @@ These tables are managed by Better Auth and are not exposed through family shari
 | `user_fasting_preferences` | Intermittent fasting targets, auto-calculation config, and alert timing |
 | `mood_entries` | Logged mood check-ins, several per day: optional mood, energy and focus ratings, tags and journal notes, with a timestamp and a `source` (`manual`, `garmin` or `import`) |
 | `mindfulness_sessions` | Logged mindfulness, meditation, and breathwork sessions |
+| `oral_care_sessions` | Brushing, flossing, mouthwash, tongue cleaning and custom ("other") oral care sessions, logged in Sparky (`manual`, `timer`) or synced from Apple Health; a synced sample upserts on `(user_id, provider, external_id)`. The daily brushing goal is `user_preferences.oral_care_daily_target` / `oral_care_target_seconds` |
 | `lab_markers` | A user's own lab markers with optional default reference range (built-in markers are defined in `@workspace/shared`) |
 | `lab_results` | Lab results with their own unit and reference range, for built-in or custom markers |
+| `lab_reports` | One imported lab report (a PDF or photo read into results); results link to it with `report_id`, and the report itself is not stored. `client_request_id` makes a retried import save once |
 | `user_custom_moods` | User-defined mood tags (icon/color) |
 | `medications` | Custom medication inventory lists |
 | `medication_schedules` | Reminders and schedules for medications |
@@ -224,6 +227,8 @@ These tables are managed by Better Auth and are not exposed through family shari
 | `openfoodfacts_sync_queue` | Dormant revision-aware automatic upload state and retained history; unused by manual contributions |
 | `rate_limit` | Sign-in rate limit counters shared across server instances |
 | `system.rate_limit_windows` | Per-address limits of the server's own routes (`middleware/ipRateLimit.ts`) shared across server instances |
+| `system.scheduled_jobs` | The latest tick of each scheduled job and the server instance that ran it (`services/scheduledJobs.ts`), so each tick runs on one instance |
+| `system.bulk_imports` | Progress of the latest Canadian Nutrient File and Livsmedelsverket import per user (`services/bulkImports.ts`), so any server instance reports it |
 | `system.rls_policy_state` | The last `rls_policies.sql` apply (`utils/applyRlsPolicies.ts`), so startup skips an unchanged one |
 | `medication_types` | Medication categories lookup |
 | `medication_route_types` | Medication administration routes lookup |
@@ -346,7 +351,7 @@ Example: `20240315103000_add_exercise_tracking.sql`
 
 2. **Write the migration SQL** — see the migration checklist in the repo's agent-docs folder (for developers and AI tools)
 
-3. **`db_schema_backup.sql` updates itself** — after merge, CI regenerates it from the migrations and opens an automated sync PR; never edit it by hand
+3. **`db_schema_backup.sql` updates itself** — after merge, CI regenerates it from the migrations and opens a sync PR that merges itself; never edit it by hand
 
 4. **Apply RLS policies** (startup applies `db/rls_policies.sql` again whenever the file or the policies in the database changed; it records what it applied in `system.rls_policy_state`)
 

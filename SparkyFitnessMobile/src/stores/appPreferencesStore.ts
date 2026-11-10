@@ -1,7 +1,9 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   DEFAULT_CHECKIN_REMINDER_TIME,
+  DEFAULT_ORAL_CARE_REMINDER_TIMES,
   normalizeCheckinReminderTimes,
+  normalizeOralCareReminderTimes,
 } from '../utils/checkinReminderTimes';
 import {
   clampGuidedCountdownSec,
@@ -54,6 +56,7 @@ import {
 import type { LanguagePreference } from '../localization';
 import type { TrendRange } from '../utils/trendRange';
 import type { OwnershipFilter } from '../utils/shareStatus';
+import { newUuid } from '../utils/ids';
 
 const STORE_KEY = '@SparkyFitness/app-preferences';
 const STORE_VERSION = 1;
@@ -75,6 +78,9 @@ const LEGACY_KEYS = {
 } as const;
 
 type LegacyKey = keyof typeof LEGACY_KEYS;
+
+export type ActiveWorkoutView = 'list' | 'focus';
+export type FocusMediaDefault = 'expanded' | 'minimized';
 
 /** Which stat the active-workout log shows in its per-set metric column. */
 export type ActiveWorkoutMetricColumn =
@@ -114,6 +120,8 @@ export const PREFERENCE_DEFAULTS = {
   onDeviceLabelScanEnabled: true,
   healthTrendsCardVisible: true,
   mindfulnessCardVisible: true,
+  oralCareCardVisible: false,
+  labResultsCardVisible: true,
   trainingLoadCardVisible: true,
   dashboardCardOrder: [...DASHBOARD_CARD_KEYS] as DashboardCardKey[],
   medicationRemindersEnabled: true,
@@ -127,11 +135,12 @@ export const PREFERENCE_DEFAULTS = {
   waterReminderWindowEnd: '22:00' as string,
   checkinRemindersEnabled: false,
   checkinReminderTimes: [DEFAULT_CHECKIN_REMINDER_TIME] as string[],
+  oralCareRemindersEnabled: false,
+  oralCareReminderTimes: [...DEFAULT_ORAL_CARE_REMINDER_TIMES] as string[],
   liquidGlassTabBarEnabled: false,
   activeWorkoutMetricColumn: 'rpe' as ActiveWorkoutMetricColumn,
   diarySummaryVisible: false,
   diarySummaryExpanded: false,
-  guidedCheckInEnabled: false,
   defaultRestSec: DEFAULT_REST_SEC as number,
   paceReferenceRace: null as PaceReferenceRace | null,
   paceReferenceOnWatch: false,
@@ -163,6 +172,8 @@ export const PREFERENCE_DEFAULTS = {
   watchLargerText: false,
   watchClassicWorkout: false,
   activeWorkoutNowCard: false,
+  activeWorkoutView: 'list' as ActiveWorkoutView,
+  focusMediaDefault: 'expanded' as FocusMediaDefault,
   watchNutrientOrder: [] as string[],
   shownWatchNutrients: [...DEFAULT_WATCH_NUTRIENTS] as string[],
   watchSetInputStyle: 'crown' as WatchSetInputStyle,
@@ -171,6 +182,8 @@ export const PREFERENCE_DEFAULTS = {
   reportDefaultRange: DEFAULT_REPORT_RANGE as TrendRange,
   hiddenReportSections: [] as ReportSectionKey[],
   compareRecentQuestions: [] as CompareQuestion[],
+  chatConversationId: null as string | null,
+  chatConversationServiceId: null as string | null,
   reportNutrientOrder: [] as string[],
   shownReportNutrients: [...DEFAULT_REPORT_NUTRIENTS] as string[],
   foodSearchOwnershipFilter: 'all' as OwnershipFilter,
@@ -203,6 +216,8 @@ export type AppPreferencesData = {
   onDeviceLabelScanEnabled: boolean;
   healthTrendsCardVisible: boolean;
   mindfulnessCardVisible: boolean;
+  oralCareCardVisible: boolean;
+  labResultsCardVisible: boolean;
   trainingLoadCardVisible: boolean;
   dashboardCardOrder: DashboardCardKey[];
   medicationRemindersEnabled: boolean;
@@ -216,12 +231,12 @@ export type AppPreferencesData = {
   waterReminderWindowEnd: string;
   checkinRemindersEnabled: boolean;
   checkinReminderTimes: string[];
+  oralCareRemindersEnabled: boolean;
+  oralCareReminderTimes: string[];
   liquidGlassTabBarEnabled: boolean;
   activeWorkoutMetricColumn: ActiveWorkoutMetricColumn;
   diarySummaryVisible: boolean;
   diarySummaryExpanded: boolean;
-  /** Adds the AddSheet's Check-In row (Settings > Diary). Off by default. */
-  guidedCheckInEnabled: boolean;
   defaultRestSec: number;
   /**
    * A recent race result the training paces are worked out from (device-local),
@@ -283,6 +298,11 @@ export type AppPreferencesData = {
   /** Recent Compare questions, newest first (at most five). */
   compareRecentQuestions: CompareQuestion[];
   addCompareRecentQuestion: (q: CompareQuestion) => void;
+  /** The Sparky chat conversation ID, kept across reopening the chat; null until first use. */
+  chatConversationId: string | null;
+  /** The AI provider the conversation ID was started with; a new provider starts a new conversation. */
+  chatConversationServiceId: string | null;
+  startChatConversation: (serviceConfigId: string | null) => void;
   /** Order of the nutrients the Nutrition report can average; unknown ones follow in catalog order. */
   reportNutrientOrder: string[];
   /** Nutrients (standard keys or custom names) the Nutrition report's "Your nutrients" card shows. */
@@ -304,6 +324,10 @@ export type AppPreferencesData = {
   watchClassicWorkout: boolean;
   /** Whether the active workout pins the Now card under the exercise rail. */
   activeWorkoutNowCard: boolean;
+  /** Active workout layout: every exercise in one list, or one at a time. */
+  activeWorkoutView: ActiveWorkoutView;
+  /** Whether the focus view opens with the large photo card or a thumbnail. */
+  focusMediaDefault: FocusMediaDefault;
   /**
    * Order of the nutrients the watch's Goals page can list (standard keys and
    * custom nutrient names). Empty until the wearer drags one.
@@ -343,6 +367,8 @@ export interface AppPreferencesState extends AppPreferencesData {
   setOnDeviceLabelScanEnabled: (value: boolean) => void;
   setHealthTrendsCardVisible: (value: boolean) => void;
   setMindfulnessCardVisible: (value: boolean) => void;
+  setOralCareCardVisible: (value: boolean) => void;
+  setLabResultsCardVisible: (value: boolean) => void;
   setTrainingLoadCardVisible: (value: boolean) => void;
   setDashboardCardOrder: (order: DashboardCardKey[]) => void;
   setMedicationRemindersEnabled: (value: boolean) => void;
@@ -357,11 +383,12 @@ export interface AppPreferencesState extends AppPreferencesData {
   setWaterReminderWindow: (start: string, end: string) => void;
   setCheckinRemindersEnabled: (enabled: boolean) => void;
   setCheckinReminderTimes: (times: string[]) => void;
+  setOralCareRemindersEnabled: (enabled: boolean) => void;
+  setOralCareReminderTimes: (times: string[]) => void;
   setLiquidGlassTabBarEnabled: (value: boolean) => void;
   setActiveWorkoutMetricColumn: (value: ActiveWorkoutMetricColumn) => void;
   setDiarySummaryVisible: (value: boolean) => void;
   setDiarySummaryExpanded: (value: boolean) => void;
-  setGuidedCheckInEnabled: (value: boolean) => void;
   setDefaultRestSec: (value: number) => void;
   setPaceReferenceRace: (value: PaceReferenceRace | null) => void;
   setPaceReferenceOnWatch: (value: boolean) => void;
@@ -402,6 +429,8 @@ export interface AppPreferencesState extends AppPreferencesData {
   setWatchLargerText: (value: boolean) => void;
   setWatchClassicWorkout: (value: boolean) => void;
   setActiveWorkoutNowCard: (value: boolean) => void;
+  setActiveWorkoutView: (value: ActiveWorkoutView) => void;
+  setFocusMediaDefault: (value: FocusMediaDefault) => void;
   setWatchNutrientOrder: (order: string[]) => void;
   setWatchNutrientShown: (key: string, isShown: boolean) => void;
   setWatchSetInputStyle: (value: WatchSetInputStyle) => void;
@@ -496,6 +525,9 @@ export const useAppPreferencesStore = create<AppPreferencesState>()(
         set({ healthTrendsCardVisible: value }),
       setMindfulnessCardVisible: (value) =>
         set({ mindfulnessCardVisible: value }),
+      setOralCareCardVisible: (value) => set({ oralCareCardVisible: value }),
+      setLabResultsCardVisible: (value) =>
+        set({ labResultsCardVisible: value }),
       setTrainingLoadCardVisible: (value) =>
         set({ trainingLoadCardVisible: value }),
       setDashboardCardOrder: (order) => set({ dashboardCardOrder: order }),
@@ -518,13 +550,16 @@ export const useAppPreferencesStore = create<AppPreferencesState>()(
         set({ checkinRemindersEnabled: enabled }),
       setCheckinReminderTimes: (times) =>
         set({ checkinReminderTimes: normalizeCheckinReminderTimes(times) }),
+      setOralCareRemindersEnabled: (enabled) =>
+        set({ oralCareRemindersEnabled: enabled }),
+      setOralCareReminderTimes: (times) =>
+        set({ oralCareReminderTimes: normalizeOralCareReminderTimes(times) }),
       setLiquidGlassTabBarEnabled: (value) =>
         set({ liquidGlassTabBarEnabled: value }),
       setActiveWorkoutMetricColumn: (value) =>
         set({ activeWorkoutMetricColumn: value }),
       setDiarySummaryVisible: (value) => set({ diarySummaryVisible: value }),
       setDiarySummaryExpanded: (value) => set({ diarySummaryExpanded: value }),
-      setGuidedCheckInEnabled: (value) => set({ guidedCheckInEnabled: value }),
       setDefaultRestSec: (value) => set({ defaultRestSec: value }),
       setPaceReferenceRace: (value) => set({ paceReferenceRace: value }),
       setPaceReferenceOnWatch: (value) => set({ paceReferenceOnWatch: value }),
@@ -625,6 +660,11 @@ export const useAppPreferencesStore = create<AppPreferencesState>()(
             isHidden
           ),
         })),
+      startChatConversation: (serviceConfigId) =>
+        set({
+          chatConversationId: newUuid(),
+          chatConversationServiceId: serviceConfigId,
+        }),
       setReportNutrientOrder: (order) => set({ reportNutrientOrder: order }),
       setReportNutrientShown: (key, isShown) =>
         set((state) => ({
@@ -662,6 +702,8 @@ export const useAppPreferencesStore = create<AppPreferencesState>()(
       setWatchLargerText: (value) => set({ watchLargerText: value }),
       setWatchClassicWorkout: (value) => set({ watchClassicWorkout: value }),
       setActiveWorkoutNowCard: (value) => set({ activeWorkoutNowCard: value }),
+      setActiveWorkoutView: (value) => set({ activeWorkoutView: value }),
+      setFocusMediaDefault: (value) => set({ focusMediaDefault: value }),
       setWatchPageHidden: (key, isHidden) =>
         set((state) => ({
           hiddenWatchPages: withMembership(
@@ -710,6 +752,8 @@ export const useAppPreferencesStore = create<AppPreferencesState>()(
         onDeviceLabelScanEnabled: state.onDeviceLabelScanEnabled,
         healthTrendsCardVisible: state.healthTrendsCardVisible,
         mindfulnessCardVisible: state.mindfulnessCardVisible,
+        oralCareCardVisible: state.oralCareCardVisible,
+        labResultsCardVisible: state.labResultsCardVisible,
         trainingLoadCardVisible: state.trainingLoadCardVisible,
         dashboardCardOrder: state.dashboardCardOrder,
         medicationRemindersEnabled: state.medicationRemindersEnabled,
@@ -723,13 +767,14 @@ export const useAppPreferencesStore = create<AppPreferencesState>()(
         waterReminderWindowEnd: state.waterReminderWindowEnd,
         checkinRemindersEnabled: state.checkinRemindersEnabled,
         checkinReminderTimes: state.checkinReminderTimes,
+        oralCareRemindersEnabled: state.oralCareRemindersEnabled,
+        oralCareReminderTimes: state.oralCareReminderTimes,
         liquidGlassTabBarEnabled: state.liquidGlassTabBarEnabled,
         // Older persisted blobs without these keys backfill via the default
         // shallow merge — no version bump needed.
         activeWorkoutMetricColumn: state.activeWorkoutMetricColumn,
         diarySummaryVisible: state.diarySummaryVisible,
         diarySummaryExpanded: state.diarySummaryExpanded,
-        guidedCheckInEnabled: state.guidedCheckInEnabled,
         defaultRestSec: state.defaultRestSec,
         paceReferenceRace: state.paceReferenceRace,
         paceReferenceOnWatch: state.paceReferenceOnWatch,
@@ -761,6 +806,8 @@ export const useAppPreferencesStore = create<AppPreferencesState>()(
         watchLargerText: state.watchLargerText,
         watchClassicWorkout: state.watchClassicWorkout,
         activeWorkoutNowCard: state.activeWorkoutNowCard,
+        activeWorkoutView: state.activeWorkoutView,
+        focusMediaDefault: state.focusMediaDefault,
         watchNutrientOrder: state.watchNutrientOrder,
         shownWatchNutrients: state.shownWatchNutrients,
         watchSetInputStyle: state.watchSetInputStyle,
@@ -769,6 +816,8 @@ export const useAppPreferencesStore = create<AppPreferencesState>()(
         reportDefaultRange: state.reportDefaultRange,
         hiddenReportSections: state.hiddenReportSections,
         compareRecentQuestions: state.compareRecentQuestions,
+        chatConversationId: state.chatConversationId,
+        chatConversationServiceId: state.chatConversationServiceId,
         reportNutrientOrder: state.reportNutrientOrder,
         shownReportNutrients: state.shownReportNutrients,
         foodSearchOwnershipFilter: state.foodSearchOwnershipFilter,

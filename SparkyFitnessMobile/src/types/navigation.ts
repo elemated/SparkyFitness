@@ -4,6 +4,7 @@ import type { NavigatorScreenParams } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type {
   ExerciseActivityQueryItem,
+  TagAction,
   FitnessTestType,
   ExerciseRecentSessionSet,
   FoodPhotoEstimateResponse,
@@ -11,6 +12,8 @@ import type {
   IndividualSessionResponse,
   MedicationEntry,
   MindfulnessSessionResponse,
+  OralCareSessionResponse,
+  OralCareType,
   PresetSessionResponse,
   RaceDistance,
   SharedPregnancy,
@@ -53,7 +56,10 @@ export type FoodPickerMode =
   | 'library'
   // #2115: pick a food+variant to link a water container to, without
   // logging a diary entry. See services/waterContainerLinkSelection.ts.
-  | 'container-link';
+  | 'container-link'
+  // #941: pick a food or a saved meal, with its amount, for an NFC tag,
+  // without logging a diary entry. See services/actionTagSelection.ts.
+  | 'action-tag';
 
 /** The routes the guided check-in walks through, in order. */
 export type GuidedCheckInStep =
@@ -126,6 +132,11 @@ export type RootStackParamList = {
   FitnessTestResult: { id: string };
   RunProgramEdit: { id?: string; fromProgramId?: string } | undefined;
   PersonalRecords: undefined;
+  LabResults: undefined;
+  /** `marker` is a `LabMarker` id: `builtin:<key>` or `custom:<uuid>`. */
+  LabResultDetail: { marker: string; name?: string };
+  LabResultAdd: { marker?: string };
+  LabReportImport: undefined;
   Routes: undefined;
   RouteDetail: { id: string };
   /** `routeId` opens a saved route in the editor and saves over it. */
@@ -136,6 +147,20 @@ export type RootStackParamList = {
   // #2115, Phase 12: mobile-only water-container CRUD.
   WaterContainers: undefined;
   WaterContainerEdit: { containerId?: number } | undefined;
+  /** The drinks logged on `date` (YYYY-MM-DD). */
+  WaterLog: { date: string };
+  // NFC tags (#941): the list, the setup form and the screen a tag link opens.
+  ActionTags: undefined;
+  /** `tagId` edits a saved tag; `tagCode` saves a tapped tag the account does not know; `presetAction` pre-fills a new one, named `presetLabel` (the food's name, which a food action does not carry). */
+  ActionTagForm:
+    | {
+        tagId?: string;
+        tagCode?: string;
+        presetAction?: TagAction;
+        presetLabel?: string;
+      }
+    | undefined;
+  ActionTagScan: { code: string };
   ExercisesLibrary: undefined;
   WorkoutPresetsLibrary: undefined;
   WorkoutPresetDetail: { preset: WorkoutPreset; updatedPreset?: WorkoutPreset };
@@ -249,6 +274,7 @@ export type RootStackParamList = {
   RunSummary: RunSummaryParams;
   Reports: undefined;
   HydrationReport: undefined;
+  OralCareReport: undefined;
   SubstancesReport: undefined;
   MeasurementsReport: undefined;
   ReportsSettings: undefined;
@@ -281,6 +307,8 @@ export type RootStackParamList = {
         pendingScannedBarcode?: string;
         scannedBarcodeNonce?: number;
         mealPlanTarget?: MealPlanPickerTarget;
+        mealTypeId?: string;
+        entryTime?: string;
       }
     | {
         mode: 'adjust-entry-nutrition';
@@ -419,6 +447,20 @@ export type RootStackParamList = {
   /** Logs a mindful session for `date`, or edits `session` when one is passed. */
   MindfulnessLog:
     { date?: string; session?: MindfulnessSessionResponse } | undefined;
+  /** A day of oral care (#1862): the goal, streak and sessions. */
+  OralCare: { date?: string } | undefined;
+  /**
+   * Logs an oral care session for `date`, or edits `session`. `careType`
+   * preselects a type and `startTimer` opens the brushing timer at once.
+   */
+  OralCareLog:
+    | {
+        date?: string;
+        session?: OralCareSessionResponse;
+        careType?: OralCareType;
+        startTimer?: boolean;
+      }
+    | undefined;
   SleepDetail: { entryId: string; day: string };
   Chat: undefined;
   ChatSettings: undefined;

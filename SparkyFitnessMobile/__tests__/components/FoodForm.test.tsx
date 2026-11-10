@@ -1262,8 +1262,8 @@ describe('FoodForm', () => {
 
     await waitFor(() => {
       expect(screen.getByDisplayValue('100')).toBeTruthy();
+      expect(screen.getByText('cup')).toBeTruthy();
     });
-    expect(screen.getByText('cup')).toBeTruthy();
     expect(screen.getAllByDisplayValue('0').length).toBeGreaterThanOrEqual(4);
   });
 
@@ -1830,5 +1830,61 @@ describe('FoodForm sodium entry unit', () => {
         screen.getByTestId('sodium-field-controls').props.className
       ).not.toContain('flex-row');
     });
+  });
+});
+
+describe('FoodForm energy unit', () => {
+  const { useEnergyUnit } = jest.requireMock<
+    typeof import('../../src/hooks/useEnergyUnit')
+  >('../../src/hooks/useEnergyUnit');
+
+  beforeEach(() => {
+    jest.mocked(useEnergyUnit).mockReturnValue('kJ');
+  });
+
+  afterEach(() => {
+    jest.mocked(useEnergyUnit).mockReturnValue('kcal');
+  });
+
+  const values = {
+    name: 'Greek Yogurt',
+    servingSize: '100',
+    servingUnit: 'g',
+    calories: '100',
+    protein: '10',
+    carbs: '8',
+    fat: '4',
+  };
+
+  it('shows and takes calories in kJ but saves kcal', () => {
+    const onSubmit = jest.fn();
+    const screen = render(
+      <FoodForm initialValues={values} onSubmit={onSubmit} />
+    );
+
+    expect(screen.getByText('Calories (kJ) *')).toBeTruthy();
+    // 100 kcal shown as 418 kJ.
+    fireEvent.changeText(screen.getByDisplayValue('418'), '836.8');
+    fireEvent.press(screen.getByText('Add Food'));
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ calories: '200' })
+    );
+  });
+
+  it('saves an untouched kcal value exactly as it was', () => {
+    const onSubmit = jest.fn();
+    const screen = render(
+      <FoodForm
+        initialValues={{ ...values, calories: '99.5' }}
+        onSubmit={onSubmit}
+      />
+    );
+
+    fireEvent.press(screen.getByText('Add Food'));
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ calories: '99.5' })
+    );
   });
 });

@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { restingHeartRateTrendDelta } from '@workspace/shared';
 import { usePreferences } from '@/contexts/PreferencesContext';
 import { useSleepEntriesQuery } from '@/hooks/CheckIn/useSleep';
 import { useResolvedHeartRateZones } from '@/hooks/Settings/useHeartRateZones';
@@ -7,6 +8,7 @@ import {
   useHealthMetricSamples,
 } from '@/hooks/useGenericHealth';
 import { DailyExerciseEntry } from '@/types/reports';
+import { samplesForDay } from '@/utils/healthMetricSamples';
 import { dayStringToMs, msToDayString } from '@/utils/heartRateWindow';
 import { zoneGradientStops } from '@/utils/heartRateZoneBands';
 import { formatTimeOfDayString } from '@/utils/timeFormatters';
@@ -112,13 +114,11 @@ export const useHeartRateData = (
       }
 
       // 2. Check if continuous wear series in hrSampleBuckets covers this workout
-      const bucket = hrSampleBuckets.find(
-        (b) => String(b.entry_date || '').slice(0, 10) === d
-      );
-      if (!bucket || !Array.isArray(bucket.samples)) return false;
+      const samples = samplesForDay(hrSampleBuckets, d);
+      if (samples.length === 0) return false;
 
       const hasExplicitSample = (
-        bucket.samples as Array<{ ex?: string; bpm?: number }>
+        samples as Array<{ ex?: string; bpm?: number }>
       ).some(
         (s) =>
           (s.ex === e.id || s.ex === name || s.ex === e['exercise_name']) &&
@@ -135,14 +135,12 @@ export const useHeartRateData = (
           parseInt(hStr || '0', 10) * 60 + parseInt(mStr || '0', 10);
         const durMin = Math.max(1, Math.round(Number(e.duration_minutes || 0)));
         const endMin = startMin + durMin;
-        return (bucket.samples as Array<{ t?: string; bpm?: number }>).some(
-          (s) => {
-            if (!s.t || (s.bpm ?? 0) <= 0) return false;
-            const dt = new Date(s.t);
-            const sMin = dt.getHours() * 60 + dt.getMinutes();
-            return sMin >= startMin && sMin <= endMin;
-          }
-        );
+        return (samples as Array<{ t?: string; bpm?: number }>).some((s) => {
+          if (!s.t || (s.bpm ?? 0) <= 0) return false;
+          const dt = new Date(s.t);
+          const sMin = dt.getHours() * 60 + dt.getMinutes();
+          return sMin >= startMin && sMin <= endMin;
+        });
       }
 
       return false;
@@ -324,12 +322,8 @@ export const useHeartRateData = (
   }, [sleepEntries, focusedDate, timezone]);
 
   const daySamples = useMemo(() => {
-    const bucket = hrSampleBuckets.find(
-      (b) => String(b.entry_date || '').slice(0, 10) === focusedDate
-    );
-    if (!bucket || !Array.isArray(bucket.samples)) return [];
     return (
-      bucket.samples as Array<{
+      samplesForDay(hrSampleBuckets, focusedDate) as Array<{
         t: string;
         bpm: number;
         ex?: string;
@@ -987,17 +981,7 @@ export const useHeartRateData = (
     const maxBpm = Math.max(...bpms);
     const avgBpm = Math.round(bpms.reduce((a, b) => a + b, 0) / bpms.length);
 
-    let trendDelta: number | null = null;
-    if (points.length >= 4) {
-      const half = Math.floor(points.length / 2);
-      const firstHalf = points.slice(0, half);
-      const secondHalf = points.slice(-half);
-      const firstAvg =
-        firstHalf.reduce((a, b) => a + b.bpm, 0) / firstHalf.length;
-      const secondAvg =
-        secondHalf.reduce((a, b) => a + b.bpm, 0) / secondHalf.length;
-      trendDelta = Math.round(secondAvg - firstAvg);
-    }
+    const trendDelta = restingHeartRateTrendDelta(bpms);
 
     return {
       points,

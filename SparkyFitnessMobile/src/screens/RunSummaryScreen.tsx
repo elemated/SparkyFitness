@@ -23,6 +23,7 @@ import {
   setExerciseEntryStrideLength,
 } from '../services/api/exerciseApi';
 import { addLog } from '../services/LogService';
+import { useNativeIOSHeadersActive } from '../services/nativeTabBarPreference';
 import {
   rateProgramWorkout,
   setProgramPosition,
@@ -47,6 +48,8 @@ import {
 } from '../utils/gpsRecording';
 import type { RootStackScreenProps } from '../types/navigation';
 import { learnWatchIndoorScale } from '../services/watchIndoorScale';
+import { energyUnitLabel, roundedEnergy } from '../utils/energyUnit';
+import { useEnergyUnit } from '../hooks/useEnergyUnit';
 
 type Props = RootStackScreenProps<'RunSummary'>;
 
@@ -59,7 +62,9 @@ const FEET_PER_METER = 3.28084;
  */
 const RunSummaryScreen: React.FC<Props> = ({ navigation, route }) => {
   const { t } = useTranslation();
+  const energyUnit = useEnergyUnit();
   const insets = useSafeAreaInsets();
+  const usesNativeHeader = useNativeIOSHeadersActive();
   const summary = route.params;
   const miles = summary.distanceUnit === 'miles';
   const unitMeters = miles ? METERS_PER_MILE : METERS_PER_KM;
@@ -255,7 +260,10 @@ const RunSummaryScreen: React.FC<Props> = ({ navigation, route }) => {
   const fastestLabel = t('recordActivity.fastest', { defaultValue: 'Fastest' });
 
   return (
-    <>
+    <View
+      className="flex-1 bg-background"
+      style={usesNativeHeader ? undefined : { paddingTop: insets.top }}
+    >
       {header}
       <ScrollView
         className="flex-1 bg-background"
@@ -299,9 +307,15 @@ const RunSummaryScreen: React.FC<Props> = ({ navigation, route }) => {
           summary.activeEnergyKcal != null &&
           summary.activeEnergyKcal > 0 ? (
             <Stat
-              label={t('watchRunLive.calories', { defaultValue: 'Calories' })}
-              value={String(Math.round(summary.activeEnergyKcal))}
-              unit={t('watchRunLive.kcal', { defaultValue: 'kcal' })}
+              label={
+                energyUnit === 'kJ'
+                  ? t('common.energy', { defaultValue: 'Energy' })
+                  : t('watchRunLive.calories', { defaultValue: 'Calories' })
+              }
+              value={String(
+                roundedEnergy(summary.activeEnergyKcal, energyUnit)
+              )}
+              unit={energyUnitLabel(energyUnit, t)}
             />
           ) : null}
         </View>
@@ -608,7 +622,7 @@ const RunSummaryScreen: React.FC<Props> = ({ navigation, route }) => {
           {t('runSummary.done', { defaultValue: 'Done' })}
         </Button>
       </ScrollView>
-    </>
+    </View>
   );
 };
 

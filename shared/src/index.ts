@@ -28,25 +28,31 @@ export * from './schemas/api/FoodPhotoEstimate.api.zod.ts';
 export * from './schemas/api/SupplementLookup.api.zod.ts';
 export * from './schemas/api/SupplementLabelScan.api.zod.ts';
 export * from './schemas/api/FoodPhotoLog.api.zod.ts';
+export * from './schemas/api/HealthMetricSamples.api.zod.ts';
 export * from './schemas/api/HeartRateZones.api.zod.ts';
 export * from './schemas/api/OpenFoodFactsAutomaticSync.api.zod.ts';
 export * from './schemas/api/OpenFoodFactsContribution.api.zod.ts';
 export * from './schemas/api/Pagination.api.zod.ts';
 export * from './schemas/api/SleepScience.api.zod.ts';
+export * from './schemas/api/SleepEntries.api.zod.ts';
 export * from './schemas/api/Symptoms.api.zod.ts';
 export * from './schemas/api/WorkoutPresets.api.zod.ts';
 export * from './schemas/api/WaterIntake.api.zod.ts';
 export * from './schemas/api/WaterContainers.api.zod.ts';
 export * from './schemas/api/HydrationNutritionRange.api.zod.ts';
 export * from './schemas/api/WorkoutDays.api.zod.ts';
+export * from './schemas/api/LabReportScan.api.zod.ts';
 export * from './schemas/api/LabResults.api.zod.ts';
 export * from './schemas/api/Mindfulness.api.zod.ts';
+export * from './schemas/api/OralCare.api.zod.ts';
 export * from './schemas/api/Mood.api.zod.ts';
 export * from './schemas/api/RunProgram.api.zod.ts';
 export * from './schemas/api/FitnessTest.api.zod.ts';
 export * from './schemas/api/RunGoals.api.zod.ts';
 export * from './schemas/api/Shoes.api.zod.ts';
 export * from './schemas/api/PlateInventory.api.zod.ts';
+export * from './schemas/api/ActionTags.api.zod.ts';
+export * from './utils/actionTagLink.ts';
 export * from './schemas/api/Route.api.zod.ts';
 export * from './schemas/database/Account.zod.ts';
 export * from './schemas/database/AdminActivityLogs.zod.ts';
@@ -108,6 +114,8 @@ export * from './schemas/database/OpenFoodFactsSyncQueue.zod.ts';
 export * from './schemas/database/Passkey.zod.ts';
 export * from './schemas/database/Profiles.zod.ts';
 export * from './schemas/database/RateLimitWindows.zod.ts';
+export * from './schemas/database/ScheduledJobs.zod.ts';
+export * from './schemas/database/BulkImports.zod.ts';
 export * from './schemas/database/RlsPolicyState.zod.ts';
 export * from './schemas/database/Session.zod.ts';
 export * from './schemas/database/SleepEntries.zod.ts';
@@ -154,6 +162,8 @@ export * from './constants/chartConstants.ts';
 export * from './constants/foodProviderTypes.ts';
 export * from './constants/supplementProviderTypes.ts';
 export * from './constants/labMarkers.ts';
+export * from './utils/labResults.ts';
+export * from './utils/labReportImport.ts';
 export * from './utils/noteImages.ts';
 export * from './utils/markdownToolbar.ts';
 export * from './nutrients/micronutrientCatalog.ts';
@@ -167,8 +177,11 @@ export * from './utils/calendar.ts';
 export * from './utils/entryTime.ts';
 export * from './utils/hydrationExample.ts';
 export * from './utils/calorieCalculations.ts';
+export * from './utils/energyUnit.ts';
 export * from './utils/sleepSameNight.ts';
+export * from './utils/oralCare.ts';
 export * from './utils/calorieRuleDefaults.ts';
+export * from './utils/calorieCycling.ts';
 export * from './utils/exerciseCalorieLink.ts';
 export * from './utils/servingSizeConversions.ts';
 export * from './utils/saltSodium.ts';
@@ -239,12 +252,15 @@ export * from './schemas/database/UserMedicationDisplayPreferences.zod.ts';
 export * from './schemas/database/UserMoodDisplayPreferences.zod.ts';
 export * from './schemas/database/UserFastingPreferences.zod.ts';
 export * from './schemas/database/LabMarkers.zod.ts';
+export * from './schemas/database/LabReports.zod.ts';
 export * from './schemas/database/LabResults.zod.ts';
 export * from './schemas/database/MindfulnessSessions.zod.ts';
+export * from './schemas/database/OralCareSessions.zod.ts';
 export * from './schemas/database/RunPrograms.zod.ts';
 export * from './schemas/database/RunGoals.zod.ts';
 export * from './schemas/database/Shoes.zod.ts';
 export * from './schemas/database/PlateInventories.zod.ts';
+export * from './schemas/database/ActionTags.zod.ts';
 export * from './schemas/database/CustomRunPrograms.zod.ts';
 export * from './schemas/database/FitnessTests.zod.ts';
 export * from './types/progression.ts';
@@ -277,6 +293,8 @@ export * from './utils/paceZones.ts';
 export * from './utils/racePaceZones.ts';
 export * from './utils/heartRateTargets.ts';
 export * from './utils/heartRateZones.ts';
+export * from './utils/restingHeartRateTrend.ts';
+export * from './utils/heartRateTimeline.ts';
 export * from './utils/zone2Guidance.ts';
 export * from './utils/runPrograms.ts';
 export * from './utils/runProgramSchedule.ts';
@@ -325,3 +343,25 @@ export * from './schemas/api/BarcodeLookup.api.zod.ts';
 export * from './utils/barcodeNutrition.ts';
 export * from './utils/runGoals.ts';
 export * from './utils/workoutEmojis.ts';
+export * from './utils/temperatureUnit.ts';
+
+export {
+  BLOOD_GLUCOSE_MG_DL_PER_MMOL_L,
+  GLUCOSE_UNITS,
+  DEFAULT_GLUCOSE_UNIT,
+  isGlucoseUnit,
+  type GlucoseUnit,
+} from './constants/bloodGlucose.ts';
+
+export {
+  measurementDayPoints,
+  type MeasurementReading,
+} from './utils/measurementTimeline.ts';
+export {
+  GLUCOSE_CONTEXT_KINDS,
+  loadGlucoseContext,
+  glucoseContextForDay,
+  type GlucoseContextKind,
+  type GlucoseContextEvent,
+  type GlucoseContextData,
+} from './glucose/context.ts';

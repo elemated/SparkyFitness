@@ -3,6 +3,8 @@ import { fireEvent, render, screen } from '@testing-library/react-native';
 
 import i18n, { initializeI18n } from '../../src/localization/i18n';
 import WhatsNewScreen from '../../src/screens/WhatsNewScreen';
+import { useGuidedCheckInStore } from '../../src/stores/guidedCheckInStore';
+import { getTodayDate } from '../../src/utils/dateUtils';
 
 jest.mock('react-native-safe-area-context', () => ({
   useSafeAreaInsets: jest.fn(() => ({ top: 0, bottom: 0, left: 0, right: 0 })),
@@ -49,6 +51,16 @@ jest.mock('../../src/hooks/useWatchConnectivity', () => ({
   }),
 }));
 
+const mockNfc = { supported: false };
+jest.mock('../../src/hooks/useNfcSupport', () => ({
+  useNfcSupport: () => ({
+    supported: mockNfc.supported,
+    enabled: mockNfc.supported,
+    isLoading: false,
+    refetch: jest.fn(),
+  }),
+}));
+
 jest.mock('uniwind', () => ({
   useCSSVariable: jest.fn((variables: string | string[]) =>
     (Array.isArray(variables) ? variables : [variables]).map(() => '#000000')
@@ -69,6 +81,7 @@ describe('WhatsNewScreen localization', () => {
     jest.clearAllMocks();
     mockWatch.supported = false;
     mockWatch.paired = false;
+    mockNfc.supported = false;
     await initializeI18n('en');
     await i18n.changeLanguage('en');
   });
@@ -99,6 +112,23 @@ describe('WhatsNewScreen localization', () => {
     expect(screen.getByText('1 515')).toBeTruthy();
   });
 
+  it('points to Daily Check-In in the + menu and starts one for today', () => {
+    useGuidedCheckInStore.setState({ progress: null });
+    render(<WhatsNewScreen navigation={navigation} route={route} />);
+
+    expect(
+      screen.getByText(
+        'Log your mood, measurements, and a progress photo in three quick steps. Find Daily Check-In in the + menu.'
+      )
+    ).toBeTruthy();
+    fireEvent.press(screen.getByText('Start a check-in'));
+
+    expect(navigation.navigate).toHaveBeenCalledWith('MoodLog', {
+      date: getTodayDate(),
+      guidedCheckIn: {},
+    });
+  });
+
   it('hides the watch settings button without a paired watch', () => {
     render(<WhatsNewScreen navigation={navigation} route={route} />);
 
@@ -113,5 +143,28 @@ describe('WhatsNewScreen localization', () => {
 
     fireEvent.press(screen.getByText('Open watch settings'));
     expect(navigation.navigate).toHaveBeenCalledWith('WatchSettings');
+  });
+
+  it('opens lab results from the lab results card', () => {
+    render(<WhatsNewScreen navigation={navigation} route={route} />);
+
+    expect(screen.getByText('Keep your lab results in one place')).toBeTruthy();
+    fireEvent.press(screen.getByText('Open lab results'));
+    expect(navigation.navigate).toHaveBeenCalledWith('LabResults');
+  });
+
+  it('hides the NFC tags button on a phone without NFC', () => {
+    render(<WhatsNewScreen navigation={navigation} route={route} />);
+
+    expect(screen.getByText('Log with a tap')).toBeTruthy();
+    expect(screen.queryByText('Set up NFC tags')).toBeNull();
+  });
+
+  it('opens NFC tag settings when the phone has NFC', () => {
+    mockNfc.supported = true;
+    render(<WhatsNewScreen navigation={navigation} route={route} />);
+
+    fireEvent.press(screen.getByText('Set up NFC tags'));
+    expect(navigation.navigate).toHaveBeenCalledWith('ActionTags');
   });
 });

@@ -3,7 +3,7 @@ import {
   earliestEntryTime,
   type ExerciseEntryHrZonesInitializer,
 } from '@workspace/shared';
-import { getClient } from '../db/poolManager.js';
+import { getClient, getSystemClient } from '../db/poolManager.js';
 import type { PoolClient } from 'pg';
 // @ts-expect-error TS(7016): Could not find a declaration file for module 'pg-f... Remove this comment to see the full error message
 import format from 'pg-format';
@@ -328,12 +328,50 @@ export const EXERCISE_ENTRY_TELEMETRY_COLUMNS = [
   'calories_applied',
 ] as const;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function telemetryValuesFrom(source: any): unknown[] {
-  return EXERCISE_ENTRY_TELEMETRY_COLUMNS.map((column) => {
-    const value = source?.[column];
-    return value === undefined ? null : value;
-  });
+const INT4_MAX = 2147483647;
+
+// The telemetry columns that are integer or smallint in exercise_entries, with
+// the range Postgres accepts for each. Health platforms report counts and
+// durations as doubles (HealthKit sums swimming stroke samples to values like
+// 120.99894867182387), and Postgres rejects a fractional or out-of-range value,
+// which fails the whole sync batch.
+export const EXERCISE_ENTRY_INTEGER_TELEMETRY_RANGES: ReadonlyMap<
+  string,
+  readonly [number, number]
+> = new Map([
+  ['heart_rate_recovery_1min', [-INT4_MAX - 1, INT4_MAX]],
+  ['stroke_count', [-INT4_MAX - 1, INT4_MAX]],
+  ['moving_time_seconds', [-INT4_MAX - 1, INT4_MAX]],
+  ['elapsed_time_seconds', [-INT4_MAX - 1, INT4_MAX]],
+  ['work_time_seconds', [-INT4_MAX - 1, INT4_MAX]],
+  // chk_exercise_entries_workout_effort
+  ['workout_effort', [1, 10]],
+]);
+
+/**
+ * Returns the value to bind for one telemetry column. Integer columns get the
+ * value rounded, and a value the column can't hold becomes null: telemetry is
+ * optional, and one bad reading shouldn't cost the whole sync batch. Other
+ * columns pass through unchanged, and undefined becomes null.
+ */
+export function telemetryValueFor(column: string, value: unknown): unknown {
+  if (value === undefined) return null;
+  const range = EXERCISE_ENTRY_INTEGER_TELEMETRY_RANGES.get(column);
+  if (!range) return value;
+  // pg hands numeric columns back as strings, so a merged update can carry one.
+  const numeric =
+    typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  if (typeof numeric !== 'number' || !Number.isFinite(numeric)) return value;
+  const rounded = Math.round(numeric);
+  return rounded >= range[0] && rounded <= range[1] ? rounded : null;
+}
+
+function telemetryValuesFrom(
+  source: Record<string, unknown> | null | undefined
+): unknown[] {
+  return EXERCISE_ENTRY_TELEMETRY_COLUMNS.map((column) =>
+    telemetryValueFor(column, source?.[column])
+  );
 }
 
 /**
@@ -375,7 +413,13 @@ async function _updateExerciseEntryTelemetryOnlyWithClient(
   await client.query(
     `UPDATE exercise_entries SET ${setClause}, updated_at = now()
      WHERE id = $${columns.length + 1} AND user_id = $${columns.length + 2}`,
-    [...columns.map((column) => telemetryFields[column]), id, userId]
+    [
+      ...columns.map((column) =>
+        telemetryValueFor(column, telemetryFields[column])
+      ),
+      id,
+      userId,
+    ]
   );
 }
 
@@ -726,9 +770,12 @@ async function _updateExerciseEntryWithClient(
   // side before the other deadlocks. Take the entry and its link first, then
   // reread.
   await lockCalorieLinkParticipantsWithClient(client, userId, [id]);
-  // Fetch existing entry to get current snapshot values if not provided in updateData
+  // Fetch existing entry to get current snapshot values if not provided in
+  // updateData. The update below writes every column back, and some writers
+  // (the distance correction) skip the locks above, so the row lock makes
+  // this read wait for them instead of restoring what they replaced.
   const existingEntryResult = await client.query(
-    'SELECT * FROM exercise_entries WHERE id = $1 AND user_id = $2',
+    'SELECT * FROM exercise_entries WHERE id = $1 AND user_id = $2 FOR UPDATE',
     [id, userId]
   );
   if (existingEntryResult.rows.length === 0) {
@@ -1361,6 +1408,39 @@ async function getExerciseEntryOwnerId(id: any, userId: any) {
     return entryResult.rows[0]?.user_id;
   } finally {
     client.release();
+  }
+}
+
+/**
+ * Whether any diary entry or workout preset exercise, of any user, still
+ * points at this image. Read without row-level security so a file only
+ * another user's row references is never taken for unused. A failed check
+ * counts as referenced: a stray file on disk is better than a lost photo.
+ */
+async function isExerciseImageReferenced(imageUrl: string): Promise<boolean> {
+  try {
+    const client = await getSystemClient();
+    try {
+      const result = await client.query(
+        // Case-insensitive, so a differently cased spelling of the same file
+        // on a case-insensitive filesystem still counts as a reference.
+        `SELECT 1 FROM exercise_entries WHERE lower(image_url) = lower($1)
+         UNION ALL
+         SELECT 1 FROM workout_preset_exercises WHERE lower(image_url) = lower($1)
+         LIMIT 1`,
+        [imageUrl]
+      );
+      return result.rows.length > 0;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    log(
+      'warn',
+      'Could not check references to an exercise image; keeping it',
+      error
+    );
+    return true;
   }
 }
 
@@ -2008,8 +2088,40 @@ async function getRecentSessionsForExercise(
 ): Promise<RecentSessionRow[]> {
   const client = await getClient(userId);
   try {
+    // Preset scoping must not leave a brand-new preset with an empty history
+    // card: when the preset itself has no qualifying sessions yet, fall back to
+    // the exercise's global recent sessions so the in-progress view still has
+    // something to compare against (issue: presetId-scoped stats returned []
+    // for a fresh preset while lastSet/global stats were populated).
+    //
+    // The scope decision runs in the SAME statement as the select (via a CTE)
+    // so a preset session committing concurrently cannot race the probe: the
+    // probe and the main query read a single snapshot. The probe applies the
+    // same excludePresetEntryId exclusion as the main query, so today's
+    // in-progress session cannot keep preset scoping active when it is the
+    // preset's only qualifying history.
     const result = await client.query(
-      `SELECT
+      `WITH scoped_preset AS (
+         SELECT CASE
+           WHEN $5::integer IS NULL THEN NULL
+           WHEN EXISTS (
+             SELECT 1
+               FROM exercise_entries ee
+               JOIN exercise_preset_entries epe ON epe.id = ee.exercise_preset_entry_id
+              WHERE ee.user_id = $1
+                AND ee.exercise_id = $2
+                AND epe.workout_preset_id = $5::integer
+                AND ($3::uuid IS NULL OR ee.exercise_preset_entry_id IS DISTINCT FROM $3::uuid)
+                AND EXISTS (
+                  SELECT 1 FROM exercise_entry_sets ees
+                   WHERE ees.exercise_entry_id = ee.id
+                     AND (ees.weight IS NOT NULL OR ees.reps IS NOT NULL OR ees.duration IS NOT NULL OR ees.distance IS NOT NULL)
+                )
+           ) THEN $5::integer
+           ELSE NULL
+         END AS preset_id
+       )
+       SELECT
          ee.entry_date::TEXT AS entry_date,
          (SELECT json_agg(set_data ORDER BY set_data.set_number, set_data.id)
             FROM (
@@ -2020,15 +2132,17 @@ async function getRecentSessionsForExercise(
             ) AS set_data
          ) AS sets
        FROM exercise_entries ee
+       CROSS JOIN scoped_preset sp
        WHERE ee.user_id = $1
          AND ee.exercise_id = $2
-         AND ($3::uuid IS NULL OR ee.exercise_preset_entry_id IS DISTINCT FROM $3)
+         AND ($3::uuid IS NULL OR ee.exercise_preset_entry_id IS DISTINCT FROM $3::uuid)
          AND (
            $5::integer IS NULL
+           OR sp.preset_id IS NULL
            OR EXISTS (
              SELECT 1 FROM exercise_preset_entries epe
               WHERE epe.id = ee.exercise_preset_entry_id
-                AND epe.workout_preset_id = $5
+                AND epe.workout_preset_id = sp.preset_id
            )
          )
          AND EXISTS (
@@ -2453,6 +2567,7 @@ export { createExerciseEntry };
 export { getExerciseEntryById };
 export { getExerciseEntryOwnerId };
 export { updateExerciseEntry };
+export { isExerciseImageReferenced };
 export { updateExerciseEntryTelemetryOnly };
 export { _updateExerciseEntryTelemetryOnlyWithClient };
 export { updateExerciseEntriesDateByPresetEntryIdWithClient };
@@ -2487,6 +2602,7 @@ export default {
   getExerciseEntryById,
   getExerciseEntryOwnerId,
   updateExerciseEntry,
+  isExerciseImageReferenced,
   updateExerciseEntryTelemetryOnly,
   _updateExerciseEntryTelemetryOnlyWithClient,
   applyWatchTelemetryAtomically,

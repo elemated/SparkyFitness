@@ -205,6 +205,11 @@ export interface WatchContextPayload {
    */
   distanceUnit?: 'km' | 'miles' | null;
   /**
+   * The phone's energy unit. Every energy number in the context stays in
+   * kcal; the watch shows it in kJ when this is `kJ`. Missing reads as `kcal`.
+   */
+  energyUnit?: 'kcal' | 'kJ' | null;
+  /**
    * The phone's Settings → Haptics switch. The watch plays button haptics
    * and the rest-end buzz only while this is on. Missing reads as on.
    */
@@ -736,7 +741,8 @@ export interface WatchWorkoutEditPayload {
     | 'setSetType'
     | 'addExercise'
     | 'deleteExercise'
-    | 'doExerciseNow';
+    | 'doExerciseNow'
+    | 'setValues';
   /** For `addSet`, `deleteExercise` and `doExerciseNow`. */
   exerciseEntryId?: string;
   /**
@@ -750,6 +756,22 @@ export interface WatchWorkoutEditPayload {
   exerciseId?: string;
   /** For `setSetType`: `normal`, `warmup`, `drop` or `failure`. */
   setType?: string;
+  /**
+   * For `setValues`: what the wearer just typed on the watch for `setId`,
+   * before logging it. Only the fields that were edited are present. Weight
+   * and a carry's distance are in kg and km, as in a logged set.
+   */
+  weightKg?: number;
+  reps?: number;
+  distanceKm?: number;
+  /** For `setValues`: epoch ms of the edit, so a late copy of an older one is dropped. */
+  at?: number;
+  /**
+   * For `setValues`: epoch ms of the arm the edit was made in. A saved workout
+   * can be armed again under the same id, and an edit queued from the earlier
+   * arm is dropped. Absent from an older watch.
+   */
+  armedAt?: number;
 }
 
 /** The wearer's answer to the watch's "update this workout?" question, asked

@@ -2,7 +2,7 @@ manifestVersion: 1
 id: sparkyfitness
 category: files
 name: SparkyFitness
-version: "v1.10.0"
+version: "v1.12.0"
 tagline: Self-hosted nutrition, exercise, and body metrics tracker
 description: >-
   🥗 SparkyFitness is a self-hosted alternative to MyFitnessPal for tracking
@@ -40,31 +40,31 @@ description: >-
   Online food databases and AI features are off until you add your own
   credentials in the app's settings; nothing is sent anywhere by default.
 releaseNotes: >-
-  - **Adaptive calorie budgets:** Dynamic Goal and Percentage Earn-Back no longer add activity calories or optional BMR credit to an Adaptive target a second time. Remaining calories may be lower after upgrading because these duplicate credits are removed. Recorded activity remains visible, and Manual targets retain their existing earn-back behavior.
+  - Lab test result management
 
-  - Use Testflight app for the latest App as the live PROD is usually outdated.
+  - NFC tags for Food & Water logging.
 
-  - Daily mood check-in reminders
+  - Add tag.sparkyfitness.com site for NFC tag links
 
-  - Track impact over time next to severity
+  - List the dev app in the tag site's iPhone link file
 
-  - Time-weighted daily heart rate average on Health Connect
+  - Add a setting to read iPhone active calories from the Move ring
 
-  - Read mindfulness sessions from Health Connect
+  - Build the Wear OS app in the EAS production workflow
 
-  - Compare any two tracked metrics (statistics + endpoint)
+  - Log water by tapping an NFC tag
 
-  - Separate daily activity from adaptive baseline
+  - Add keyless MapLibre OpenStreetMap map rendering on Android
 
-  - Show running cadence and stride for watch runs, the run summary and trends
+  - Safe defaults above one server replica
 
-  - Add photo attachments to Sparky chat
+  - Add a readiness endpoint and use it for the Docker health check
 
-  - Generate routes with a routing provider
+  - Attach tracker heart rate to workouts logged in SparkyFitness
 
-  - Add Wear OS companion app and Android watch-connectivity bridge
+  - Optionally adjust percentage macros with exercise calories
 
-  Full release notes: https://github.com/CodeWithCJ/SparkyFitness/releases/tag/v1.10.0
+  Full release notes: https://github.com/CodeWithCJ/SparkyFitness/releases/tag/v1.12.0
 
 developer: CodeWithCJ
 website: https://codewithcj.github.io/SparkyFitness/

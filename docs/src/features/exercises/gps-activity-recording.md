@@ -267,11 +267,11 @@ If you have run a [fitness test](/features/exercises/fitness-tests), the zones a
 
 ## Maps on Android
 
-The route map uses Apple Maps on iOS. On Android it uses Google Maps when the build was made with a Google Maps API key; without one, Android shows the route as a plain line instead. See [Environment Variables](/install/environment-variables) for `GOOGLE_MAPS_ANDROID_API_KEY`.
+The route map uses Apple Maps on iOS. On Android it uses OpenStreetMap (drawn natively with MapLibre) unless the build was made with a Google Maps API key, in which case it keeps Google Maps. The OpenStreetMap path needs no key, billing account or Google Play Services; see [Environment Variables](/install/environment-variables) for `GOOGLE_MAPS_ANDROID_API_KEY`. Its tiles come from OpenFreeMap and need a network connection; when they cannot load, the map area stays blank while the rest of the screen works normally.
 
 ## Weather
 
-A GPS-recorded activity can carry the weather at its start: temperature, conditions, wind and humidity. The temperature and conditions show as a **Weather** tile on the activity's detail screen (in °F when your distance unit is miles), and the web shows the full set in the activity report. Activities imported from Garmin already carry theirs, and it is never replaced.
+A GPS-recorded activity can carry the weather at its start: temperature, conditions, wind and humidity. The temperature and conditions show as a **Weather** tile on the activity's detail screen (in your temperature unit, set under **Settings → Preferences → Temperature Unit** on the web), and the web shows the full set in the activity report. Activities imported from Garmin already carry theirs, and it is never replaced.
 
 It is off until a weather provider is available to you. In **Settings → External Providers** add a provider of the type **Weather (Open-Meteo compatible)**, or use one the admin made public or a family member shared with you. Nothing is pre-filled: you enter the server URL yourself. `https://api.open-meteo.com` is Open-Meteo's public server (its archive for older activities is served from `archive-api.open-meteo.com`, which the server uses on its own); a self-hosted Open-Meteo serves both under one URL. Open-Meteo's free service is for **non-commercial use only**; for commercial use enter `https://customer-api.open-meteo.com` and the API key you bought (sent as `apikey`), or run your own server.
 
@@ -305,7 +305,11 @@ For a run, the app also works out your **cadence** (steps per minute while you w
 
 A record is the time for exactly that distance. For an activity with a GPS track (or the distance series of an indoor run), SparkyFitness finds the fastest stretch of that distance inside it, so your fastest 5 km within a 10 km run counts as a 5 km record. An activity with no track only counts when its distance is within about 2% under to 5% over the standard, and its time is scaled to the exact distance by its average pace. A 5.8 km run with no track is not a 5 km record.
 
-When a run you just saved set one or more of them, the summary screen shows a **New personal record** card with the distance and time, and a link to the full list. A run recorded on the watch shows it too.
+A time faster than the sport allows never counts, because the activity's time or distance must be wrong: for example a test stopped after a few seconds but saved with its full distance, or an import with a bad value. The limit is 12 metres a second for running (so no 5 km under about 7 minutes), 7 for walking and hiking, 30 for cycling and 5 for swimming; a treadmill run counts as running and an exercise bike as cycling. Other sports, such as rowing, ellipticals, stair climbers or skiing, hold no distance records, so they have no limit. If the fastest stretch of a distance inside a GPS track or distance series is over the limit (a jump in the recorded distance), that track or series gives no time for that distance at all, not even from its slower stretches; the activity's own pace can still count when its distance nearly matches the standard. If an activity's own time or distance is wrong, correct it and it can count again. Correcting an indoor run's distance (see [Correcting a treadmill distance](#correcting-a-treadmill-distance)) also rescales its distance series, which can bring a refused stretch under the limit, although the jump itself stays; a GPS track cannot be corrected this way.
+
+When none of your activities holds a record yet, the list shows a single **Best Effort** card with your longest activity over 0.5 km instead, passing over any that is faster than its sport allows.
+
+When a run you just saved set one or more records, or became your Best Effort, the summary screen shows a **New personal record** card with the distance and time, and a link to the full list. A run recorded on the watch shows it too.
 
 ## Correcting a treadmill distance
 

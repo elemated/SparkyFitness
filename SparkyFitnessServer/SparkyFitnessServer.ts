@@ -1,6 +1,9 @@
 import path from 'path';
 import { emailLoginGuard } from './middleware/emailLoginGuard.js';
 import { passkeyLoginGuard } from './middleware/passkeyLoginGuard.js';
+import { magicLinkLoginGuard } from './middleware/magicLinkLoginGuard.js';
+import { restoreWriteFence } from './middleware/restoreWriteFence.js';
+import { UPLOAD_STAGING_DIR } from './utils/uploadsPath.js';
 
 import fs from 'fs';
 import type { ServerResponse } from 'http';
@@ -12,6 +15,7 @@ import cookieParser from 'cookie-parser';
 import { bridgeBearerAuthHeader } from './utils/bearerAuthBridge.js';
 import { endPool } from './db/poolManager.js';
 import { installShutdownHandlers } from './utils/gracefulShutdown.js';
+import { watchAuthSchema } from './utils/authSchemaWatch.js';
 import { log } from './config/logging.js';
 import { authenticate, authenticateMcp } from './middleware/authMiddleware.js';
 import { isReadOnlyApiKeyAuthMutation } from './middleware/readOnlyApiKeyGuard.js';
@@ -104,13 +108,16 @@ import pregnancyRoutesV2 from './routes/v2/pregnancyRoutes.js';
 import reportRoutesV2 from './routes/v2/reportRoutes.js';
 import nutritionKineticsRoutesV2 from './routes/v2/nutritionKineticsRoutes.js';
 import mindfulnessRoutesV2 from './routes/v2/mindfulnessRoutes.js';
+import oralCareRoutesV2 from './routes/v2/oralCareRoutes.js';
 import labResultRoutesV2 from './routes/v2/labResultRoutes.js';
+import labReportRoutesV2 from './routes/v2/labReportRoutes.js';
 import heartRateZoneRoutesV2 from './routes/v2/heartRateZoneRoutes.js';
 import runProgramRoutesV2 from './routes/v2/runProgramRoutes.js';
 import fitnessTestRoutesV2 from './routes/v2/fitnessTestRoutes.js';
 import runGoalRoutesV2 from './routes/v2/runGoalRoutes.js';
 import shoeRoutesV2 from './routes/v2/shoeRoutes.js';
 import plateInventoryRoutesV2 from './routes/v2/plateInventoryRoutes.js';
+import actionTagRoutesV2 from './routes/v2/actionTagRoutes.js';
 import routeRoutesV2 from './routes/v2/routeRoutes.js';
 import backupRoutes from './routes/backupRoutes.js';
 import errorHandler from './middleware/errorHandler.js';
@@ -250,6 +257,9 @@ app.use(
     );
   })
 );
+// Before every route, /mcp and Better Auth included; after CORS so a browser
+// can read the 503.
+app.use(restoreWriteFence);
 // OAuth discovery is top-level even though Better Auth itself is mounted under
 // /api/auth. Hosted MCP clients probe both the origin and resource-specific
 // forms. Keep the explicit allowlist so unrelated /.well-known routes (such as
@@ -336,6 +346,7 @@ const mountBetterAuth = () => {
 };
 app.use(emailLoginGuard);
 app.use(passkeyLoginGuard);
+app.use(magicLinkLoginGuard);
 app.use(
   createMcpOAuthAuthGate({
     isAuthHandlerMounted: () => betterAuthHandlerInstance !== null,
@@ -566,7 +577,13 @@ app.use(['/uploads', '/api/uploads'], (req, res, next) => {
   // Lowercased because Express routing and macOS/Windows filesystems are all
   // case-insensitive, so /uploads/Pregnancy/... reaches the same bytes.
   const firstSegment = normalized.split('/').filter(Boolean)[0]?.toLowerCase();
-  if (firstSegment && SENSITIVE_UPLOAD_SUBTREES.has(firstSegment)) {
+  // Request and restore staging (including a restore's kept copy of every
+  // subtree above) is never served.
+  if (
+    firstSegment &&
+    (SENSITIVE_UPLOAD_SUBTREES.has(firstSegment) ||
+      firstSegment === UPLOAD_STAGING_DIR)
+  ) {
     res.status(404).end();
     return;
   }
@@ -850,13 +867,16 @@ app.use('/api/v2/pregnancy', pregnancyRoutesV2);
 app.use('/api/v2/reports', reportRoutesV2);
 app.use('/api/v2/nutrition', nutritionKineticsRoutesV2);
 app.use('/api/v2/mindfulness', mindfulnessRoutesV2);
+app.use('/api/v2/oral-care', oralCareRoutesV2);
 app.use('/api/v2/lab-results', labResultRoutesV2);
+app.use('/api/v2/lab-reports', labReportRoutesV2);
 app.use('/api/v2/heart-rate-zones', heartRateZoneRoutesV2);
 app.use('/api/v2/run-program', runProgramRoutesV2);
 app.use('/api/v2/fitness-tests', fitnessTestRoutesV2);
 app.use('/api/v2/run-goals', runGoalRoutesV2);
 app.use('/api/v2/shoes', shoeRoutesV2);
 app.use('/api/v2/plate-inventory', plateInventoryRoutesV2);
+app.use('/api/v2/action-tags', actionTagRoutesV2);
 app.use('/api/v2/routes', routeRoutesV2);
 app.use('/api/workout-presets', workoutPresetRoutes);
 app.use('/api/workout-plan-templates', workoutPlanTemplateRoutes);
@@ -948,7 +968,11 @@ app.get('/api/api-docs', (_req, res) => res.redirect('/api/api-docs/swagger'));
   // Fix for reverse proxies using HTTP keepalive (e.g. Traefik, Caddy)
   server.keepAliveTimeout = 181000; // Must be > proxy's idle timeout (nginx=75s, traefik=default 180s)
   server.headersTimeout = 182000; // Must be slightly > keepAliveTimeout
-  installShutdownHandlers(server);
+  const shutdown = installShutdownHandlers(server);
+  watchAuthSchema(
+    () => authModule.checkAuthSchema(),
+    () => shutdown('Database schema mismatch')
+  );
 })().catch(async (error) => {
   console.error('Failed to start server:', error);
   // A failed boot must stop the process. Setting process.exitCode alone leaves

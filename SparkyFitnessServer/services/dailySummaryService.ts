@@ -17,7 +17,10 @@ import {
   resolveDeviceProjectionSnapshot,
   sumFoodEntryCalories,
 } from './calorieBalanceService.js';
-import type { ExerciseSessionResponse } from '@workspace/shared';
+import type {
+  CalorieCyclingDay,
+  ExerciseSessionResponse,
+} from '@workspace/shared';
 import {
   resolveSupplementTotals,
   withCalorieRuleDefaults,
@@ -51,7 +54,10 @@ export async function getDailySummary({
     deviceTotalRows,
   ] = await Promise.all([
     goalService.getUserGoals(targetUserId, date, undefined, false),
-    goalService.getUserGoals(targetUserId, date, undefined, true),
+    goalService.getUserGoals(targetUserId, date, undefined, true, {
+      actorUserId,
+      includeCheckin,
+    }),
     foodEntryService.getFoodEntriesByDate(actorUserId, targetUserId, date),
     getExerciseEntriesByDateV2(targetUserId, date),
     includeCheckin
@@ -189,6 +195,11 @@ export async function getDailySummary({
     adjustedGoalData?.water_goal_ml ?? rawWaterGoal
   );
   const waterGoalChanged = adjustedWaterGoal !== rawWaterGoal;
+  const macrosChanged = (['protein', 'carbs', 'fat'] as const).some(
+    (nutrient) =>
+      Number(adjustedGoalData?.[nutrient] ?? 0) !==
+      Number(rawGoalData?.[nutrient] ?? 0)
+  );
 
   const computedAdjustedGoals: {
     calories: number;
@@ -197,7 +208,7 @@ export async function getDailySummary({
     fat: number;
     water_goal_ml?: number;
   } | null =
-    adjCalories !== rawCalories || waterGoalChanged
+    adjCalories !== rawCalories || waterGoalChanged || macrosChanged
       ? {
           calories: Math.round(adjCalories),
           protein: Math.round(Number(adjustedGoalData?.protein) || 0),
@@ -238,6 +249,12 @@ export async function getDailySummary({
       hipsCm: measured(measurements?.hips),
     },
     adjustedGoals: computedAdjustedGoals,
+    // Calorie cycling on this day (#2327), when the user has it switched on.
+    ...(adjustedGoalData?.calorie_cycling
+      ? {
+          calorieCycling: adjustedGoalData.calorie_cycling as CalorieCyclingDay,
+        }
+      : {}),
     // Exposed separately as well as folded into `calorieBalance.eaten`, so the Diary can
     // show what supplements contributed instead of leaving a gap between the headline
     // total and the food rows underneath it.

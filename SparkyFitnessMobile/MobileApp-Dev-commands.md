@@ -24,8 +24,8 @@ keytool -genkey -v -keystore android/app/my-release-key.keystore -alias my-key-a
 
 GitHub needs your key and passwords to sign the app.
 
-1.  Go to your GitHub Repo -> **Settings** -> **Secrets and variables** -> **Actions**.
-2.  Add these 4 secrets:
+1.  Go to your GitHub Repo -> **Settings** -> **Environments** -> **release** (create it if it does not exist, limited to `main` and `v*` tags, with yourself as a required reviewer).
+2.  Add these 4 secrets as environment secrets there. If they also exist as repository secrets, delete those copies once a release build has signed with the environment ones: a job without the environment still reads repository secrets, so a workflow pushed on any branch could read them.
 
 | Secret Name              | Value                                    |
 | :----------------------- | :--------------------------------------- |
@@ -46,7 +46,7 @@ GitHub needs your key and passwords to sign the app.
 
 1.  Check in your code (`git push`).
 2.  Create a **Release** in GitHub (tag starting with `v`, e.g., `v1.0.0`) OR just push if your workflow is set to run on push.
-3.  GitHub Actions will build the APK/AAB and attach it to the Release, along with `wearos-release.apk` for the Wear OS app.
+3.  Approve the waiting `release` deployment in the Actions tab. GitHub Actions then builds the APK/AAB and attaches it to the Release, along with `wearos-release.apk` for the Wear OS app.
 
 Running the workflow by hand also creates or updates the `v<version>` release, so it is not a dry run.
 
@@ -60,6 +60,14 @@ The watch app is a separate upload to its own track, and the phone's `production
    eas build --platform android --profile wearos
    ```
 3. Upload the AAB to the Wear OS track. Upload it whenever you ship the phone app, so the two stay in step.
+
+The `production-build-submission.yml` workflow builds the phone, watch and iOS apps together and submits each one as its build finishes, so one run (expo.dev → Workflows → Run workflow, or `eas workflow:run production-build-submission.yml`) ships all three. The iOS build goes through the workflow's `testflight` job, which adds it to the external `SparkyFitnessExternalTesting` group and submits it for Apple's Beta App Review (the `eas.json` submit profile's `groups` only takes internal groups). Expo's "Build from GitHub" button runs a single build profile, not this workflow. To build and submit only the watch, add `--auto-submit`:
+
+```bash
+eas build --platform android --profile wearos --auto-submit
+```
+
+Submitting uses the `eas.json` `submit` profile with the same name as the build profile, so the phone goes to the `alpha` track and the watch to `wear:WearOS Track`. These names must match your tracks in Play Console. The default closed testing track is `alpha` (shown as "Closed testing - Alpha"); other closed tracks use the name they were created with, and a Wear OS one is `wear:<name>`, so the watch's "Closed testing - WearOS Track" is `wear:WearOS Track`. A wrong name fails the submit with "Track not found". Change them in `eas.json` if yours have different names. EAS needs a Google service account key with release access to the app, added once through `eas credentials`. Play reviews the phone and watch releases separately.
 
 A watch release build's version code is minutes since the epoch, because Play requires a code that is unique across form factors and rises with each upload. Two builds in the same minute get the same code, so rebuild if Play rejects one. Set `SPARKY_WEAR_VERSION_CODE` to override it, with a number above the one on Play.
 
